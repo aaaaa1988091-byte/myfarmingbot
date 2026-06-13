@@ -37,7 +37,7 @@ from garden2 import (
     # tablist
     tablist_updater, get_tablist_cached,
     # 寵物
-    get_current_pet, switch_pet_rod, pet_cd_monitor,
+    get_current_pet, switch_pet_rod, pet_cd_monitor, wait_for_pet_detection, pet_name_matches,
     # 除蟲
     PatrolBot, PatrolState,
     # 聊天工具
@@ -367,8 +367,8 @@ def _wait_for_current_pet(target_label: str, timeout: float = 2.0) -> bool:
     deadline = time.time() + timeout
     target = (target_label or "").strip().lower()
     while time.time() < deadline:
-        cur = get_current_pet().strip().lower()
-        if target and target in cur:
+        cur = get_current_pet()
+        if target and pet_name_matches(cur, target_label):
             return True
         time.sleep(0.05)
     return False
@@ -382,7 +382,7 @@ def _switch_pet_and_equip(
     global _gear_switching
     target_label = _pet_target_label(target_pet)
     current = get_current_pet()
-    needs_switch = target_label not in current
+    needs_switch = not pet_name_matches(current, target_label)
 
     if respect_pet_switch_cooldown and needs_switch and time.time() - g2._pet_switch_cooldown <= PET_SWITCH_COOLDOWN:
         log(f"寵物切換冷卻中，暫停：{target_label}")
@@ -399,9 +399,15 @@ def _switch_pet_and_equip(
         stop_farm_keys()
 
         if needs_switch:
+            before_pet = current
             switch_pet_rod(reason or f"切換 {target_label}")
-            g2.set_current_pet(target_label)
-            _wait_for_current_pet(target_label, timeout=2.0)
+            detected = wait_for_pet_detection(target_label, previous=before_pet, timeout=5.0)
+            if not detected:
+                after_pet = get_current_pet() or "未知"
+                minescript.echo(f"§c[寵物] 切換偵測逾時：目標 {target_label}，目前 {after_pet}")
+                log(f"寵物切換偵測逾時：target={target_label}, before={before_pet}, after={after_pet}")
+                return False
+            minescript.echo(f"§a[寵物] 已偵測到 {get_current_pet()}，開始換裝")
             time.sleep(0.2)
 
         try:
@@ -946,7 +952,11 @@ def chat_listener_loop():
     import queue as _queue
     from minescript import EventQueue, EventType
     pat_yuck   = re.compile(r"YUCK", re.IGNORECASE)
-    pat_autopet = re.compile(r"Autopet equipped your \[Lvl \d+\] (.+?)!", re.IGNORECASE)
+    pet_switch_patterns = [
+        re.compile(r"Autopet equipped your \[Lvl \d+\] (.+?)!", re.IGNORECASE),
+        re.compile(r"You (?:summoned|equipped) your \[Lvl \d+\] (.+?)!", re.IGNORECASE),
+        re.compile(r"(?:Summoned|Equipped) \[Lvl \d+\] (.+?)!", re.IGNORECASE),
+    ]
     with EventQueue() as eq:
         eq.register_chat_listener()
         minescript.echo("§7[ChatPest] 聊天監聽已啟動")
@@ -964,13 +974,17 @@ def chat_listener_loop():
                 raw   = str(ev.message)
                 if len(raw) > 300: continue
                 clean = _strip_mc(raw)
-                m_ap  = pat_autopet.search(clean)
-                if m_ap:
-                    pet_name = _normalize_pet_name_from_autopet(m_ap.group(1))
+                pet_match = None
+                for pat_pet in pet_switch_patterns:
+                    pet_match = pat_pet.search(clean)
+                    if pet_match:
+                        break
+                if pet_match:
+                    pet_name = _normalize_pet_name_from_autopet(pet_match.group(1))
                     if pet_name:
-                        g2.set_current_pet(pet_name)
-                    minescript.echo(f"§7[寵物] Autopet 確認: {m_ap.group(1).strip()}"
-                                    f"（tablist: {get_current_pet()}）")
+                        g2.set_current_pet(pet_name, source="chat")
+                    minescript.echo(f"§7[寵物] 切換確認: {pet_match.group(1).strip()}"
+                                    f"（目前: {get_current_pet()}）")
                 if not pat_yuck.search(raw): continue
                 plot_num = _extract_plot_num(raw)
                 if plot_num is None:
@@ -984,7 +998,7 @@ def chat_listener_loop():
                 log(f"ChatPest：Plot {plot_num}")
                 # 蟲生成 → 切玫瑰龍（同步執行，避免漏切）
                 cur = get_current_pet()
-                if "Rose" not in cur and "dragon" not in cur.lower():
+                if not pet_name_matches(cur, "Rose"):
                     _switch_pet_and_equip(
                         "dragon",
                         "蟲出現切玫瑰龍",
