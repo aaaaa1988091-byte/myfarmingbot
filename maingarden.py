@@ -401,13 +401,16 @@ def _switch_pet_and_equip(
         if needs_switch:
             before_pet = current
             switch_pet_rod(reason or f"切換 {target_label}")
-            detected = wait_for_pet_detection(target_label, previous=before_pet, timeout=5.0)
-            if not detected:
+            detected = wait_for_pet_detection(target_label, previous=before_pet, timeout=3.5)
+            if detected:
+                minescript.echo(f"§a[寵物] 已偵測到 {get_current_pet()}，開始換裝")
+            else:
+                # tablist / chat 在伺服器延遲時可能晚到；不要因此把整個除蟲/農業流程卡死。
+                # 先用目標寵物作為保守快取，後續 tablist/chat 若回報不同會自動覆蓋。
                 after_pet = get_current_pet() or "未知"
-                minescript.echo(f"§c[寵物] 切換偵測逾時：目標 {target_label}，目前 {after_pet}")
-                log(f"寵物切換偵測逾時：target={target_label}, before={before_pet}, after={after_pet}")
-                return False
-            minescript.echo(f"§a[寵物] 已偵測到 {get_current_pet()}，開始換裝")
+                g2.set_current_pet(target_label, source="assumed")
+                minescript.echo(f"§e[寵物] 尚未收到伺服器確認，先按目標 {target_label} 繼續（切前 {before_pet or '未知'}，目前 {after_pet}）")
+                log(f"寵物切換未即時確認，先假定成功：target={target_label}, before={before_pet}, after={after_pet}")
             time.sleep(0.2)
 
         try:
@@ -953,9 +956,9 @@ def chat_listener_loop():
     from minescript import EventQueue, EventType
     pat_yuck   = re.compile(r"YUCK", re.IGNORECASE)
     pet_switch_patterns = [
-        re.compile(r"Autopet equipped your \[Lvl \d+\] (.+?)!", re.IGNORECASE),
-        re.compile(r"You (?:summoned|equipped) your \[Lvl \d+\] (.+?)!", re.IGNORECASE),
-        re.compile(r"(?:Summoned|Equipped) \[Lvl \d+\] (.+?)!", re.IGNORECASE),
+        re.compile(r"Autopet equipped your (?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
+        re.compile(r"You (?:summoned|equipped) your (?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
+        re.compile(r"(?:Summoned|Equipped) (?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
     ]
     with EventQueue() as eq:
         eq.register_chat_listener()

@@ -352,9 +352,7 @@ def switch_pet_rod(reason=""):
         _pet_switch_cooldown = time.time()
         if reason:
             minescript.echo(f"§b[寵物] {reason} → 切換完成")
-        with _tablist_lock:
-            global _current_pet_name
-            _current_pet_name = ""
+        # 不要清空目前寵物快取：tablist/chat 可能延遲，清空會讓後續偵測完全失去基準。
         time.sleep(random.uniform(0.1, 0.15))
         minescript.player_inventory_select_slot(2)
         if was_farming:
