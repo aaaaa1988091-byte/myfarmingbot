@@ -532,8 +532,15 @@ def pet_cd_monitor():
             action_idle = not g2._pet_switching and not _gear_switching and not major_action_busy()
 
             if farm_on and not _is_blossom_equipped():
-                _pest_cd_switch_done = False
                 _pest_cd_last_seen = None
+                current_pet = get_current_pet()
+                if _pest_cd_switch_done or "Mosquito" in current_pet:
+                    if not _pest_cd_block_logged:
+                        log("pest cooldown 已切換 Pesthunters，暫停偵測直到重新穿回 blossom 套")
+                        _pest_cd_block_logged = True
+                    time.sleep(0.5)
+                    continue
+                _pest_cd_switch_done = False
                 if pest_idle and patrol_ok and action_idle and time.time() - _last_blossom_sync_attempt >= 10.0:
                     _last_blossom_sync_attempt = time.time()
                     log("pest cooldown 偵測前同步 blossom 套")
