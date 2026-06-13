@@ -37,7 +37,7 @@ from garden2 import (
     # tablist
     tablist_updater, get_tablist_cached,
     # 寵物
-    get_current_pet, switch_pet_rod, pet_cd_monitor, wait_for_pet_detection, pet_name_matches,
+    get_current_pet, switch_pet_rod, pet_cd_monitor, pet_name_matches,
     # 除蟲
     PatrolBot, PatrolState,
     # 聊天工具
@@ -363,6 +363,33 @@ def _normalize_pet_name_from_autopet(name: str) -> str:
         return "Mosquito"
     return s
 
+
+def _chat_confirmed_pet_since(start_time: float, target_label: str = "") -> str:
+    meta = g2.get_current_pet_meta()
+    if meta.get("source") != "chat" or meta.get("updated_at", 0.0) < start_time:
+        return ""
+    pet = meta.get("name") or ""
+    if target_label and not pet_name_matches(pet, target_label):
+        return pet
+    return pet
+
+def _extract_pet_name_from_chat(clean: str) -> str:
+    text = re.sub(r"\s+", " ", clean or " ").strip()
+    low = text.lower()
+    if not any(key in low for key in ("autopet equipped your", "you summoned your", "you equipped your", "summoned", "equipped")):
+        return ""
+    m = re.search(r"\[\s*Lvl\s+\d+\s*\]\s*(.+?)(?:!|$)", text, re.IGNORECASE)
+    if m:
+        return _normalize_pet_name_from_autopet(m.group(1))
+    for pat in (
+        r"Autopet equipped your\s+(.+?)(?:!|$)",
+        r"You (?:summoned|equipped) your\s+(.+?)(?:!|$)",
+    ):
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return _normalize_pet_name_from_autopet(m.group(1))
+    return ""
+
 def _wait_for_current_pet(target_label: str, timeout: float = 2.0) -> bool:
     deadline = time.time() + timeout
     target = (target_label or "").strip().lower()
@@ -402,19 +429,31 @@ def _switch_pet_and_equip(
             detected = False
             last_pet = current
             for attempt in range(1, 4):
+                switch_started = time.time()
                 before_pet = get_current_pet()
                 switch_pet_rod(reason or f"切換 {target_label}")
-                detected = wait_for_pet_detection(target_label, previous=before_pet, timeout=3.5)
-                last_pet = get_current_pet() or "未知"
+                deadline = switch_started + 4.0
+                while time.time() < deadline:
+                    chat_pet = _chat_confirmed_pet_since(switch_started, target_label)
+                    if chat_pet:
+                        last_pet = chat_pet
+                        if pet_name_matches(chat_pet, target_label):
+                            detected = True
+                            minescript.echo(f"§a[寵物] chat 確認 {chat_pet}，開始換裝")
+                        else:
+                            minescript.echo(f"§e[寵物] chat 確認目前是 {chat_pet}，不是 {target_label}，重試")
+                        break
+                    time.sleep(0.05)
                 if detected:
-                    minescript.echo(f"§a[寵物] 已偵測到 {get_current_pet()}，開始換裝")
                     break
-                minescript.echo(f"§e[寵物] 第 {attempt}/3 次尚未偵測到 {target_label}（目前 {last_pet}），準備重試")
-                log(f"寵物切換未達目標：attempt={attempt}, target={target_label}, before={before_pet}, after={last_pet}")
+                if not last_pet:
+                    last_pet = get_current_pet() or "未知"
+                minescript.echo(f"§e[寵物] 第 {attempt}/3 次沒有收到 {target_label} 的 chat 確認（目前 {last_pet}），準備重試")
+                log(f"寵物切換 chat 未確認目標：attempt={attempt}, target={target_label}, before={before_pet}, after={last_pet}")
                 time.sleep(0.25)
             if not detected:
-                minescript.echo(f"§c[寵物] 已重試 3 次仍不是 {target_label}（目前 {last_pet}），停止換裝避免保持錯誤寵物")
-                log(f"寵物切換失敗，停止換裝：target={target_label}, current={last_pet}")
+                minescript.echo(f"§c[寵物] 沒有收到 {target_label} 的 chat 確認（目前 {last_pet}），停止換裝避免錯寵物")
+                log(f"寵物切換失敗：未收到目標 chat 確認 target={target_label}, current={last_pet}")
                 return False
             time.sleep(0.2)
 
@@ -960,11 +999,6 @@ def chat_listener_loop():
     import queue as _queue
     from minescript import EventQueue, EventType
     pat_yuck   = re.compile(r"YUCK", re.IGNORECASE)
-    pet_switch_patterns = [
-        re.compile(r"Autopet equipped your\s+(?:[0-9a-fk-or]\s*)?(?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
-        re.compile(r"You (?:summoned|equipped) your\s+(?:[0-9a-fk-or]\s*)?(?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
-        re.compile(r"^\s*(?:Summoned|Equipped)\s+(?:[0-9a-fk-or]\s*)?(?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
-    ]
     with EventQueue() as eq:
         eq.register_chat_listener()
         minescript.echo("§7[ChatPest] 聊天監聽已啟動")
@@ -982,17 +1016,10 @@ def chat_listener_loop():
                 raw   = str(ev.message)
                 if len(raw) > 300: continue
                 clean = _strip_mc(raw)
-                pet_match = None
-                for pat_pet in pet_switch_patterns:
-                    pet_match = pat_pet.search(clean)
-                    if pet_match:
-                        break
-                if pet_match:
-                    pet_name = _normalize_pet_name_from_autopet(pet_match.group(1))
-                    if pet_name:
-                        g2.set_current_pet(pet_name, source="chat")
-                    minescript.echo(f"§7[寵物] 切換確認: {pet_match.group(1).strip()}"
-                                    f"（目前: {get_current_pet()}）")
+                pet_name = _extract_pet_name_from_chat(clean)
+                if pet_name:
+                    g2.set_current_pet(pet_name, source="chat")
+                    minescript.echo(f"§7[寵物] chat 確認: {pet_name}（目前: {get_current_pet()}）")
                 if not pat_yuck.search(raw): continue
                 plot_num = _extract_plot_num(raw)
                 if plot_num is None:
