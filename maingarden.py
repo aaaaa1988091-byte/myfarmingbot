@@ -19,6 +19,11 @@ import asyncio
 
 # ── 載入函式庫 ──────────────────────────────────
 import garden2 as g2
+try:
+    import example
+except Exception as e:
+    example = None
+    print(f"無法載入 example.py: {e}")
 from garden2 import (
     # 常數
     FARM_RANGE, FARM_ORIGIN, HOE_SLOT, STATUS_INTERVAL,
@@ -46,8 +51,7 @@ from garden2 import (
 # ────────────────────────────────────────────────
 report_channel_id = 1282381209472860272
 status_channel_id = 1479084761845858406
-token = "MTE2NDEzMTE4ODczMTAzMTYwMg.G-i_Yc.JJDZZ0WQEE2In1EGTsCwLv_rzv8EiO4dhJLWso"
-
+token = ""
 # ────────────────────────────────────────────────
 #  共享可變狀態
 # ────────────────────────────────────────────────
@@ -63,7 +67,13 @@ _bot_generation = 0
 
 _pest_busy        = False
 _pest_lock        = threading.Lock()
+_major_action_lock = threading.Lock()
 _chat_pest_enabled = False
+_pest_cd_switch_done = False
+_gear_switching = False
+_pest_cd_last_seen = None
+PEST_SWITCH_THRESHOLD_SEC = 170  # 2m50s
+PEST_SWITCH_RESET_SEC = 190       # 回到較高冷卻時，允許下一輪再次切換
 
 target_hwnd = None
 
@@ -241,15 +251,31 @@ def is_in_farm():
     except:
         return False
 
-def wait_for_position(timeout=12):
+def wait_for_position(timeout=12, min_delta=0.75, settle_seconds=0.35, poll_interval=0.05):
+    """等伺服器真正更新座標並穩定，避免傳送延遲造成誤判。"""
+    try:
+        start_pos = tuple(minescript.player_position())
+    except:
+        start_pos = None
     deadline = time.time() + timeout
+    last_pos = None
+    stable_since = None
     while time.time() < deadline:
         try:
-            pos = minescript.player_position()
-            if any(abs(c) > 1 for c in pos): return True
+            pos = tuple(minescript.player_position())
         except:
-            pass
-        time.sleep(0.5)
+            time.sleep(poll_interval)
+            continue
+        if start_pos is not None and dist3(pos, start_pos) >= min_delta:
+            if last_pos == pos:
+                if stable_since is None:
+                    stable_since = time.time()
+                elif time.time() - stable_since >= settle_seconds:
+                    return True
+            else:
+                last_pos = pos
+                stable_since = None
+        time.sleep(poll_interval)
     return False
 
 def stop_farm_keys():
@@ -260,6 +286,12 @@ def stop_farm_keys():
     minescript.player_press_right(False)
 
 def start_farm_keys():
+    deadline = time.time() + 5.0
+    while _gear_switching and time.time() < deadline:
+        time.sleep(0.05)
+    if _gear_switching:
+        log("農業按鍵啟動被換裝流程阻擋")
+        return
     focus_minecraft(); time.sleep(0.1)
     minescript.player_inventory_select_slot(HOE_SLOT); time.sleep(0.1)
     minescript.player_press_forward(True); time.sleep(0.05)
@@ -268,6 +300,219 @@ def start_farm_keys():
     else:                  minescript.player_press_right(True)
     time.sleep(0.1)
     start_mouse_hold()
+
+def perform_farm_entry_actions():
+    minescript.player_press_sneak(True)
+    time.sleep(0.5)
+    minescript.player_inventory_select_slot(4)
+    time.sleep(0.3)
+    lclick_once()
+    time.sleep(random.uniform(3.0, 4.0))
+    lclick_once()
+    time.sleep(0.3)
+    minescript.player_press_sneak(False)
+
+def _parse_cd_seconds(raw_cd):
+    if raw_cd is None:
+        return None
+    s = str(raw_cd).strip()
+    if not s:
+        return None
+    if "READY" in s.upper():
+        return 0
+    total = 0
+    found = False
+    m = re.search(r"(\d+)\s*m", s, re.IGNORECASE)
+    if m:
+        total += int(m.group(1)) * 60
+        found = True
+    m = re.search(r"(\d+)\s*s", s, re.IGNORECASE)
+    if m:
+        total += int(m.group(1))
+        found = True
+    return total if found else None
+
+
+def _pet_target_label(target_pet: str) -> str:
+    target = (target_pet or "").lower()
+    if target == "mosquito":
+        return "Mosquito"
+    if target == "dragon":
+        return "Rose"
+    return target_pet
+
+
+def _pet_target_to_equip_set(target_pet: str) -> str:
+    target = (target_pet or "").lower()
+    if target in {"dragon", "rose", "blossom"}:
+        return "blossom"
+    if target in {"mosquito", "pest", "pesthunters"}:
+        return "pesthunters"
+    return "all"
+
+
+
+def _normalize_pet_name_from_autopet(name: str) -> str:
+    s = (name or "").strip()
+    if not s:
+        return ""
+    low = s.lower()
+    if "rose dragon" in low or low.endswith("dragon") or "blossom" in low:
+        return "Rose"
+    if "mosquito" in low or "pest" in low:
+        return "Mosquito"
+    return s
+
+def _wait_for_current_pet(target_label: str, timeout: float = 2.0) -> bool:
+    deadline = time.time() + timeout
+    target = (target_label or "").strip().lower()
+    while time.time() < deadline:
+        cur = get_current_pet().strip().lower()
+        if target and target in cur:
+            return True
+        time.sleep(0.05)
+    return False
+
+def _switch_pet_and_equip(
+    target_pet: str,
+    reason: str = "",
+    resume_farm: bool = False,
+    respect_pet_switch_cooldown: bool = True,
+) -> bool:
+    global _gear_switching
+    target_label = _pet_target_label(target_pet)
+    current = get_current_pet()
+    needs_switch = target_label not in current
+
+    if respect_pet_switch_cooldown and needs_switch and time.time() - g2._pet_switch_cooldown <= PET_SWITCH_COOLDOWN:
+        log(f"寵物切換冷卻中，暫停：{target_label}")
+        return False
+
+    if example is None:
+        minescript.echo("§c[寵物] example.py 無法載入，略過換裝")
+        log("example.py 無法載入，略過換裝")
+        return False
+
+    _gear_switching = True
+    try:
+        release_all()
+        stop_farm_keys()
+
+        if needs_switch:
+            switch_pet_rod(reason or f"切換 {target_label}")
+            g2.set_current_pet(target_label)
+            _wait_for_current_pet(target_label, timeout=2.0)
+            time.sleep(0.2)
+
+        try:
+            example.click_equipment_set(_pet_target_to_equip_set(target_pet))
+        except Exception as e:
+            minescript.echo(f"§c[寵物] 換裝失敗: {e}")
+            log(f"換裝失敗: {e}")
+            return False
+
+        try:
+            example.sell_vinyl()
+        except Exception as e:
+            minescript.echo(f"§e[寵物] 唱片清理失敗，繼續下一步: {e}")
+            log(f"唱片清理失敗: {e}")
+
+    finally:
+        _gear_switching = False
+
+    if resume_farm and farm_state == "on":
+        start_farm_keys()
+
+    return True
+
+
+def get_pest_cd_display():
+    try:
+        ui_cd = cd_var.get()
+        if ui_cd and ui_cd != "---":
+            return ui_cd
+    except Exception:
+        pass
+    raw_cd = g2.get_tablist_cached().get("pest_cooldown")
+    return raw_cd or "---"
+
+
+def _get_pest_cd_text():
+    try:
+        ui_cd = cd_var.get()
+        if ui_cd and ui_cd != "---":
+            return ui_cd
+    except Exception:
+        pass
+    return g2.get_tablist_cached().get("pest_cooldown")
+
+
+def pet_cd_monitor():
+    global _pest_cd_switch_done, _pest_cd_last_seen
+    while True:
+        try:
+            raw_cd = _get_pest_cd_text()
+            raw_text = str(raw_cd or "")
+            cd = _parse_cd_seconds(raw_cd)
+            farm_on = farm_state == "on"
+            pest_idle = not _pest_busy
+            patrol_ok = patrol_bot.state == PatrolState.IDLE
+
+            if not (farm_on and pest_idle and patrol_ok and not g2._pet_switching and not major_action_busy()):
+                _pest_cd_switch_done = False
+                _pest_cd_last_seen = None
+                time.sleep(0.5)
+                continue
+
+            if cd is None:
+                _pest_cd_switch_done = False
+                _pest_cd_last_seen = None
+                time.sleep(0.5)
+                continue
+
+            current_pet = get_current_pet()
+            ready_now = "READY" in raw_text.upper()
+            if cd >= PEST_SWITCH_RESET_SEC:
+                _pest_cd_switch_done = False
+                _pest_cd_last_seen = cd
+                time.sleep(0.5)
+                continue
+
+            if _pest_cd_last_seen != cd:
+                log(f"pest cooldown raw={raw_cd!r}, parsed={cd}")
+                _pest_cd_last_seen = cd
+
+            if ready_now and not _pest_cd_switch_done:
+                if "Mosquito" not in current_pet:
+                    minescript.echo("§e[寵物] pest cooldown READY，切換蚊子+Pesthunters")
+                    log("寵物切換：READY，切換蚊子+Pesthunters")
+                    if _switch_pet_and_equip(
+                        "mosquito",
+                        "READY切蚊子",
+                        resume_farm=True,
+                        respect_pet_switch_cooldown=False,
+                    ):
+                        _pest_cd_switch_done = True
+                else:
+                    _pest_cd_switch_done = True
+            elif (
+                cd <= PEST_SWITCH_THRESHOLD_SEC
+                and cd > 0
+                and not _pest_cd_switch_done
+                and "Mosquito" not in current_pet
+            ):
+                minescript.echo(f"§e[寵物] pest cooldown 到點（CD={cd}s），切換蚊子+Pesthunters")
+                log(f"寵物切換：CD={cd}s 到點，切換蚊子+Pesthunters")
+                if _switch_pet_and_equip(
+                    "mosquito",
+                    "CD切蚊子",
+                    resume_farm=True,
+                    respect_pet_switch_cooldown=False,
+                ):
+                    _pest_cd_switch_done = True
+        except Exception:
+            pass
+        time.sleep(0.5)
 
 # ────────────────────────────────────────────────
 #  全局停止
@@ -333,6 +578,12 @@ def farm_monitor():
     player_pos = tuple(round(c) for c in minescript.player_position())
     while farm_state == "on" and _bot_generation == my_gen:
         try:
+            if _gear_switching or major_action_busy() or _pest_busy:
+                stuck_count = 0
+                player_pos = tuple(round(c) for c in minescript.player_position())
+                time.sleep(0.5)
+                continue
+
             curr = tuple(round(c) for c in minescript.player_position())
             x, y, z = curr
             stuck_count = stuck_count + 1 if player_pos == curr else 0
@@ -351,8 +602,14 @@ def farm_monitor():
                     FARM_RANGE["y"][0] <= y <= FARM_RANGE["y"][1] and
                     FARM_RANGE["z"][0] <= z <= FARM_RANGE["z"][1]):
                 minescript.echo("§c超出範圍，重置...")
+                if major_action_busy():
+                    time.sleep(1)
+                    continue
+                if not _major_action_lock.acquire(blocking=False):
+                    time.sleep(1)
+                    continue
                 farm_state = "off"; stats["reset_count"] += 1
-                threading.Thread(target=reset_and_restart, args=(my_gen,), daemon=True).start()
+                threading.Thread(target=reset_and_restart_guarded, args=(my_gen, True), daemon=True).start()
                 break
             time.sleep(1)
         except Exception as e:
@@ -400,13 +657,7 @@ def reset_and_restart(my_gen):
     minescript.echo("§b[重置] AOTE 導航至田道原點...")
     aote_navigate_to(FARM_ORIGIN)
     if _bot_generation != my_gen: return
-    # 蹲下確保落地 + 視角道具修正（兩次）
-    minescript.player_press_sneak(True); time.sleep(0.5)
-    minescript.player_inventory_select_slot(4); time.sleep(0.3)
-    lclick_once()
-    time.sleep(random.uniform(3.0, 4.0))
-    lclick_once(); time.sleep(0.3)
-    minescript.player_press_sneak(False)
+    perform_farm_entry_actions()
     if _bot_generation != my_gen: return
     farm_state = "on"; stats["start_time"] = time.time(); update_button(True)
     start_farm_keys()
@@ -415,21 +666,156 @@ def reset_and_restart(my_gen):
 # ────────────────────────────────────────────────
 #  農業開關
 # ────────────────────────────────────────────────
+def wait_for_stable_position(stable_seconds=2.0, timeout=15.0, poll_interval=0.1):
+    """持續蹲下，直到座標連續 stable_seconds 沒有變化。"""
+    deadline = time.time() + timeout
+    last_pos = None
+    stable_since = None
+    minescript.player_press_sneak(True)
+    while time.time() < deadline:
+        try:
+            curr_pos = tuple(round(c, 2) for c in minescript.player_position())
+        except:
+            time.sleep(poll_interval)
+            continue
+        if curr_pos == last_pos:
+            if stable_since is None:
+                stable_since = time.time()
+            elif time.time() - stable_since >= stable_seconds:
+                return True
+        else:
+            last_pos = curr_pos
+            stable_since = None
+        time.sleep(poll_interval)
+    return False
+
+def major_action_busy():
+    return _major_action_lock.locked()
+
+def reset_and_restart_guarded(my_gen, preacquired=False):
+    global farm_state, reset_attempts
+    owned_lock = preacquired
+    try:
+        if not owned_lock:
+            if not _major_action_lock.acquire(blocking=False):
+                minescript.echo("§7[重置] 其他主要動作進行中，取消")
+                return
+            owned_lock = True
+        if _bot_generation != my_gen:
+            return
+
+        stop_farm_keys()
+        if stats["start_time"]:
+            stats["total_seconds"] += int(time.time() - stats["start_time"])
+            stats["start_time"] = None
+
+        if reset_attempts >= MAX_RESET_ATTEMPTS:
+            msg = f"⛔ 重置連續失敗 {reset_attempts} 次，Bot 已停止"
+            minescript.echo(f"§c{msg}")
+            log(msg)
+            farm_state = "off"
+            update_button(False)
+            async def _n():
+                ch = bot.get_channel(report_channel_id)
+                if ch:
+                    await ch.send(msg)
+            if bot.loop and bot.loop.is_running():
+                asyncio.run_coroutine_threadsafe(_n(), bot.loop)
+            return
+
+        if reset_attempts > 0:
+            wait = min(RESET_BASE_DELAY * (2 ** (reset_attempts - 1)), 120)
+            minescript.echo(f"§e[重置] 等待 {wait}s...")
+            time.sleep(wait)
+
+        if _bot_generation != my_gen:
+            return
+
+        reset_attempts += 1
+        minescript.echo("§e[重置] /warp garden...")
+        minescript.execute("/warp garden")
+        wait_for_position(10)
+        time.sleep(2)
+        if _bot_generation != my_gen:
+            return
+
+        if not is_in_farm():
+            minescript.execute("/l")
+            time.sleep(7)
+            minescript.execute("/skyblock")
+            time.sleep(8)
+            minescript.execute("/warp garden")
+            time.sleep(9)
+            if _bot_generation != my_gen:
+                return
+            if not is_in_farm():
+                farm_state = "off"
+                update_button(False)
+                return reset_and_restart_guarded(my_gen, preacquired=True)
+
+        if _bot_generation != my_gen:
+            return
+
+        reset_attempts = 0
+        minescript.execute("/plottp 13")
+        wait_for_position(10)
+        time.sleep(1.5)
+        if _bot_generation != my_gen:
+            return
+
+        minescript.echo("§b[重置] AOTE 導航至田道原點...")
+        aote_navigate_to(FARM_ORIGIN)
+        if _bot_generation != my_gen:
+            return
+
+        perform_farm_entry_actions()
+        if _bot_generation != my_gen:
+            return
+
+        farm_state = "on"
+        stats["start_time"] = time.time()
+        update_button(True)
+        start_farm_keys()
+        threading.Thread(target=farm_monitor, daemon=True).start()
+    finally:
+        if owned_lock:
+            try:
+                _major_action_lock.release()
+            except:
+                pass
+
 def toggle_farm():
     global farm_state, reset_attempts
     if farm_state == "off":
-        if patrol_bot.state != PatrolState.IDLE:
-            minescript.echo("§e[Bot] 除蟲中，先停止再啟動農業")
-            patrol_bot.stop(); patrol_bot._done_event.wait(timeout=5)
-        reset_attempts = 0; farm_state = "on"
-        stats["start_time"] = time.time(); update_button(True)
-        # 確保玫瑰龍
-        if "Rose" not in get_current_pet() and \
-                time.time() - g2._pet_switch_cooldown > PET_SWITCH_COOLDOWN:
-            threading.Thread(target=lambda: switch_pet_rod("開農業切玫瑰龍"), daemon=True).start()
-        start_farm_keys()
-        threading.Thread(target=farm_monitor, daemon=True).start()
-        log("農業啟動")
+        if major_action_busy():
+            minescript.echo("§e[Bot] 其他主要動作進行中，暫停啟動農業")
+            log("農業啟動被主要動作鎖住")
+            return
+        if not _major_action_lock.acquire(blocking=False):
+            minescript.echo("§e[Bot] 啟動農業時被其他任務搶佔")
+            log("農業啟動失敗：主要動作鎖被占用")
+            return
+        try:
+            if patrol_bot.state != PatrolState.IDLE:
+                minescript.echo("§e[Bot] 除蟲中，先停止再啟動農業")
+                patrol_bot.stop(); patrol_bot._done_event.wait(timeout=5)
+            reset_attempts = 0; farm_state = "on"
+            stats["start_time"] = time.time(); update_button(True)
+            # 確保玫瑰龍
+            _switch_pet_and_equip("dragon", "開農業切玫瑰龍")
+            minescript.execute("/plottp 13"); wait_for_position(10); time.sleep(1.5)
+            aote_navigate_to(FARM_ORIGIN)
+            if not wait_for_stable_position(2.0, timeout=15.0):
+                log("農業起始等待座標穩定逾時")
+            perform_farm_entry_actions()
+            start_farm_keys()
+            threading.Thread(target=farm_monitor, daemon=True).start()
+            log("農業啟動")
+        finally:
+            try:
+                _major_action_lock.release()
+            except:
+                pass
     else:
         stop_everything("F8 停止")
 
@@ -439,10 +825,16 @@ def toggle_farm():
 def pest_run():
     global farm_state, _pest_busy
     my_gen = _bot_generation
+    owned_major = False
     with _pest_lock:
         if _pest_busy: log("⚠️ /pest 已在執行中"); return
         _pest_busy = True
     try:
+        if not _major_action_lock.acquire(blocking=False):
+            minescript.echo("§7[/pest] 其他主要動作進行中，取消")
+            log("/pest：主要動作忙碌")
+            return
+        owned_major = True
         was_farming = (farm_state == "on")
         if was_farming:
             minescript.execute("/setspawn"); time.sleep(0.3)
@@ -453,6 +845,12 @@ def pest_run():
                 stats["total_seconds"] += int(time.time() - stats["start_time"])
                 stats["start_time"] = None
             time.sleep(0.5)
+            if _bot_generation != my_gen: return
+            _switch_pet_and_equip(
+                "dragon",
+                "???????",
+                respect_pet_switch_cooldown=False,
+            )
         minescript.echo("§b[/pest] 開始除蟲..."); log("/pest：開始除蟲")
         if not patrol_bot.start():
             minescript.echo("§c[/pest] PatrolBot 無法啟動"); return
@@ -466,8 +864,6 @@ def pest_run():
             minescript.player_press_sneak(True)
             time.sleep(random.uniform(1.0, 1.5))
             minescript.player_press_sneak(False); time.sleep(0.3)
-            if _bot_generation != my_gen: return
-            minescript.echo("§a[/pest] 恢復農業"); log("/pest：恢復農業")
             farm_state = "on"; stats["start_time"] = time.time(); update_button(True)
             start_farm_keys()
             threading.Thread(target=farm_monitor, daemon=True).start()
@@ -476,6 +872,11 @@ def pest_run():
     except Exception as e:
         minescript.echo(f"§c[/pest] 出錯: {e}"); log(f"/pest 出錯: {e}")
     finally:
+        if owned_major:
+            try:
+                _major_action_lock.release()
+            except:
+                pass
         _pest_busy = False
         tk_root.after(0, lambda: pest_btn.config(text="🪲 /pest", bg=C["yel"], fg="#1a2e1a"))
 
@@ -489,6 +890,11 @@ def chat_pest_run(plot_num):
         if _pest_busy: log(f"⚠️ chat pest: 已忙碌，跳過 Plot {plot_num}"); return
         _pest_busy = True
     try:
+        if not _major_action_lock.acquire(blocking=False):
+            minescript.echo(f"§7[ChatPest] 其他主要動作進行中，跳過 Plot {plot_num}")
+            log(f"ChatPest：主要動作忙碌 Plot {plot_num}")
+            return
+        owned_major = True
         delay = random.uniform(5, 10)
         minescript.echo(f"§e[ChatPest] 偵測到 Plot {plot_num} 有蟲，{delay:.1f}s 後暫停農業除蟲")
         log(f"ChatPest：Plot {plot_num}，等待 {delay:.1f}s")
@@ -502,6 +908,12 @@ def chat_pest_run(plot_num):
                 stats["total_seconds"] += int(time.time() - stats["start_time"])
                 stats["start_time"] = None
             time.sleep(0.5)
+            if _bot_generation != my_gen: return
+            _switch_pet_and_equip(
+                "dragon",
+                "???????",
+                respect_pet_switch_cooldown=False,
+            )
         minescript.echo(f"§b[ChatPest] 前往 Plot {plot_num} 除蟲...")
         if not patrol_bot.start_single_plot(plot_num):
             minescript.echo("§c[ChatPest] PatrolBot 忙碌"); return
@@ -515,7 +927,6 @@ def chat_pest_run(plot_num):
             minescript.player_press_sneak(True)
             time.sleep(random.uniform(1.0, 1.5))
             minescript.player_press_sneak(False); time.sleep(0.3)
-            if _bot_generation != my_gen: return
             farm_state = "on"; stats["start_time"] = time.time(); update_button(True)
             start_farm_keys()
             threading.Thread(target=farm_monitor, daemon=True).start()
@@ -523,6 +934,11 @@ def chat_pest_run(plot_num):
     except Exception as e:
         minescript.echo(f"§c[ChatPest] 出錯: {e}"); log(f"ChatPest 出錯: {e}")
     finally:
+        if owned_major:
+            try:
+                _major_action_lock.release()
+            except:
+                pass
         _pest_busy = False
         tk_root.after(0, lambda: pest_btn.config(text="🪲 /pest", bg=C["yel"], fg="#1a2e1a"))
 
@@ -550,6 +966,9 @@ def chat_listener_loop():
                 clean = _strip_mc(raw)
                 m_ap  = pat_autopet.search(clean)
                 if m_ap:
+                    pet_name = _normalize_pet_name_from_autopet(m_ap.group(1))
+                    if pet_name:
+                        g2.set_current_pet(pet_name)
                     minescript.echo(f"§7[寵物] Autopet 確認: {m_ap.group(1).strip()}"
                                     f"（tablist: {get_current_pet()}）")
                 if not pat_yuck.search(raw): continue
@@ -563,14 +982,14 @@ def chat_listener_loop():
                     continue
                 minescript.echo(f"§a[ChatPest] Plot {plot_num} 有蟲！準備除蟲")
                 log(f"ChatPest：Plot {plot_num}")
-                # 蟲生成 → 切玫瑰龍
-                if farm_state == "on":
-                    cur = get_current_pet()
-                    if "Rose" not in cur and \
-                            time.time() - g2._pet_switch_cooldown > PET_SWITCH_COOLDOWN:
-                        threading.Thread(
-                            target=lambda: switch_pet_rod("蟲出現切玫瑰龍"), daemon=True
-                        ).start()
+                # 蟲生成 → 切玫瑰龍（同步執行，避免漏切）
+                cur = get_current_pet()
+                if "Rose" not in cur and "dragon" not in cur.lower():
+                    _switch_pet_and_equip(
+                        "dragon",
+                        "蟲出現切玫瑰龍",
+                        respect_pet_switch_cooldown=False,
+                    )
                 threading.Thread(target=chat_pest_run, args=(plot_num,), daemon=True).start()
             except Exception as e:
                 minescript.echo(f"§c[ChatPest] 處理訊息出錯: {e}")
@@ -648,7 +1067,7 @@ def update_status_loop():
             gems_var.set(_fmt(tb.get("gems")))
             pn = tb.get("pet_name"); pl = tb.get("pet_level")
             pet_var.set(f"Lv{pl} {pn}" if pn else "---")
-            cd_var.set(tb.get("pest_cooldown") or "---")
+            cd_var.set(get_pest_cd_display())
         tk_root.after(0, _do)
         time.sleep(1)
 
