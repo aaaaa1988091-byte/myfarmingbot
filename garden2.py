@@ -63,6 +63,8 @@ _pet_switch_cooldown  = 0.0
 _pet_switching        = False
 _mosquito_switch_done = False   # 本週期是否已切過蚊子
 _current_pet_name     = ""
+_current_pet_updated_at = 0.0
+_current_pet_source   = ""
 
 # maingarden 注入的回呼（避免循環 import）
 # maingarden 呼叫 set_callbacks() 完成注入
@@ -254,7 +256,7 @@ def tablist_updater():
                 _tablist_cache.update(info)
             pet_name = info.get("pet_name") or ""
             if pet_name:
-                set_current_pet(pet_name)
+                set_current_pet(pet_name, source="tablist")
         except:
             pass
         time.sleep(0.1)
@@ -263,9 +265,56 @@ def get_tablist_cached() -> dict:
     with _tablist_lock:
         return _tablist_cache.copy()
 
-def set_current_pet(name: str):
-    global _current_pet_name
-    _current_pet_name = (name or "").strip()
+def normalize_pet_name(name: str) -> str:
+    """把 tablist/chat 裡不同格式的寵物名稱正規化，方便切換偵測比對。"""
+    s = re.sub(r"§[0-9a-fk-orA-FK-OR]", "", str(name or "")).strip()
+    s = re.sub(r"^(?:your\s+)+", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^[0-9a-fk-orA-FK-OR]\s*(?=\[?Lvl\b)", "", s).strip()
+    s = re.sub(r"^\[?Lvl\s+\d+\]?\s*", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^[0-9a-fk-orA-FK-OR]\s*(?=[A-Z])", "", s).strip()
+    low = s.lower()
+    if "mosquito" in low or "pest" in low:
+        return "Mosquito"
+    if "rose dragon" in low or "rose" in low or "dragon" in low or "blossom" in low:
+        return "Rose"
+    return s
+
+def pet_name_matches(current: str, target: str) -> bool:
+    cur = normalize_pet_name(current).lower()
+    tgt = normalize_pet_name(target).lower()
+    return bool(tgt and (tgt in cur or cur in tgt))
+
+def set_current_pet(name: str, source: str = "manual"):
+    global _current_pet_name, _current_pet_updated_at, _current_pet_source
+    normalized = normalize_pet_name(name)
+    if not normalized:
+        return
+    _current_pet_name = normalized
+    _current_pet_updated_at = time.time()
+    _current_pet_source = source
+
+def get_current_pet_meta() -> dict:
+    return {
+        "name": _current_pet_name,
+        "updated_at": _current_pet_updated_at,
+        "source": _current_pet_source,
+    }
+
+def wait_for_pet_detection(target: str = "", previous: str = "", timeout: float = 5.0, poll_interval: float = 0.1) -> bool:
+    """等待 tablist/chat 確認寵物切換。target 有值時等待指定寵物；否則等待寵物與 previous 不同。"""
+    deadline = time.time() + timeout
+    prev_norm = normalize_pet_name(previous).lower()
+    while time.time() < deadline:
+        cur = get_current_pet()
+        if target:
+            if pet_name_matches(cur, target):
+                return True
+        else:
+            cur_norm = normalize_pet_name(cur).lower()
+            if cur_norm and cur_norm != prev_norm:
+                return True
+        time.sleep(poll_interval)
+    return False
 
 def _parse_cd_seconds(cd_str):
     """解析 CD 字串為秒數，READY 回傳 0，解析失敗回傳 None"""
@@ -306,9 +355,7 @@ def switch_pet_rod(reason=""):
         _pet_switch_cooldown = time.time()
         if reason:
             minescript.echo(f"§b[寵物] {reason} → 切換完成")
-        with _tablist_lock:
-            global _current_pet_name
-            _current_pet_name = ""
+        # 不要清空目前寵物快取：tablist/chat 可能延遲，清空會讓後續偵測完全失去基準。
         time.sleep(random.uniform(0.1, 0.15))
         minescript.player_inventory_select_slot(2)
         if was_farming:
