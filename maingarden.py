@@ -74,6 +74,7 @@ _gear_switching = False
 _pest_cd_last_seen = None
 _current_equipment_set = None
 _pest_cd_block_logged = False
+_last_blossom_sync_attempt = 0.0
 PEST_SWITCH_THRESHOLD_SEC = 170  # 2m50s
 PEST_SWITCH_RESET_SEC = 190       # 回到較高冷卻時，允許下一輪再次切換
 
@@ -522,13 +523,28 @@ def _get_pest_cd_text():
 
 
 def pet_cd_monitor():
-    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged
+    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged, _last_blossom_sync_attempt
     while True:
         try:
             farm_on = farm_state == "on"
+            pest_idle = not _pest_busy
+            patrol_ok = patrol_bot.state == PatrolState.IDLE
+            action_idle = not g2._pet_switching and not _gear_switching and not major_action_busy()
+
             if farm_on and not _is_blossom_equipped():
                 _pest_cd_switch_done = False
                 _pest_cd_last_seen = None
+                if pest_idle and patrol_ok and action_idle and time.time() - _last_blossom_sync_attempt >= 10.0:
+                    _last_blossom_sync_attempt = time.time()
+                    log("pest cooldown 偵測前同步 blossom 套")
+                    _switch_pet_and_equip(
+                        "dragon",
+                        "pest cooldown 偵測前確認 blossom 套",
+                        resume_farm=True,
+                        respect_pet_switch_cooldown=False,
+                    )
+                    time.sleep(0.5)
+                    continue
                 if not _pest_cd_block_logged:
                     log("pest cooldown 偵測暫停：目前穿戴不是 blossom 套")
                     _pest_cd_block_logged = True
@@ -539,10 +555,8 @@ def pet_cd_monitor():
             raw_cd = _get_pest_cd_text()
             raw_text = str(raw_cd or "")
             cd = _parse_cd_seconds(raw_cd)
-            pest_idle = not _pest_busy
-            patrol_ok = patrol_bot.state == PatrolState.IDLE
 
-            if not (farm_on and pest_idle and patrol_ok and not g2._pet_switching and not major_action_busy()):
+            if not (farm_on and pest_idle and patrol_ok and action_idle):
                 _pest_cd_switch_done = False
                 _pest_cd_last_seen = None
                 time.sleep(0.5)
