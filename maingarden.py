@@ -399,18 +399,23 @@ def _switch_pet_and_equip(
         stop_farm_keys()
 
         if needs_switch:
-            before_pet = current
-            switch_pet_rod(reason or f"切換 {target_label}")
-            detected = wait_for_pet_detection(target_label, previous=before_pet, timeout=3.5)
-            if detected:
-                minescript.echo(f"§a[寵物] 已偵測到 {get_current_pet()}，開始換裝")
-            else:
-                # tablist / chat 在伺服器延遲時可能晚到；不要因此把整個除蟲/農業流程卡死。
-                # 先用目標寵物作為保守快取，後續 tablist/chat 若回報不同會自動覆蓋。
-                after_pet = get_current_pet() or "未知"
-                g2.set_current_pet(target_label, source="assumed")
-                minescript.echo(f"§e[寵物] 尚未收到伺服器確認，先按目標 {target_label} 繼續（切前 {before_pet or '未知'}，目前 {after_pet}）")
-                log(f"寵物切換未即時確認，先假定成功：target={target_label}, before={before_pet}, after={after_pet}")
+            detected = False
+            last_pet = current
+            for attempt in range(1, 4):
+                before_pet = get_current_pet()
+                switch_pet_rod(reason or f"切換 {target_label}")
+                detected = wait_for_pet_detection(target_label, previous=before_pet, timeout=3.5)
+                last_pet = get_current_pet() or "未知"
+                if detected:
+                    minescript.echo(f"§a[寵物] 已偵測到 {get_current_pet()}，開始換裝")
+                    break
+                minescript.echo(f"§e[寵物] 第 {attempt}/3 次尚未偵測到 {target_label}（目前 {last_pet}），準備重試")
+                log(f"寵物切換未達目標：attempt={attempt}, target={target_label}, before={before_pet}, after={last_pet}")
+                time.sleep(0.25)
+            if not detected:
+                minescript.echo(f"§c[寵物] 已重試 3 次仍不是 {target_label}（目前 {last_pet}），停止換裝避免保持錯誤寵物")
+                log(f"寵物切換失敗，停止換裝：target={target_label}, current={last_pet}")
+                return False
             time.sleep(0.2)
 
         try:
@@ -956,9 +961,9 @@ def chat_listener_loop():
     from minescript import EventQueue, EventType
     pat_yuck   = re.compile(r"YUCK", re.IGNORECASE)
     pet_switch_patterns = [
-        re.compile(r"Autopet equipped your (?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
-        re.compile(r"You (?:summoned|equipped) your (?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
-        re.compile(r"(?:Summoned|Equipped) (?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
+        re.compile(r"Autopet equipped your\s+(?:[0-9a-fk-or]\s*)?(?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
+        re.compile(r"You (?:summoned|equipped) your\s+(?:[0-9a-fk-or]\s*)?(?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
+        re.compile(r"^\s*(?:Summoned|Equipped)\s+(?:[0-9a-fk-or]\s*)?(?:\[Lvl \d+\]\s*)?(.+?)(?:!|$)", re.IGNORECASE),
     ]
     with EventQueue() as eq:
         eq.register_chat_listener()

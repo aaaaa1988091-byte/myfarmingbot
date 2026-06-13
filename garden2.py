@@ -268,7 +268,10 @@ def get_tablist_cached() -> dict:
 def normalize_pet_name(name: str) -> str:
     """把 tablist/chat 裡不同格式的寵物名稱正規化，方便切換偵測比對。"""
     s = re.sub(r"§[0-9a-fk-orA-FK-OR]", "", str(name or "")).strip()
+    s = re.sub(r"^(?:your\s+)+", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^[0-9a-fk-orA-FK-OR]\s*(?=\[?Lvl\b)", "", s).strip()
     s = re.sub(r"^\[?Lvl\s+\d+\]?\s*", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^[0-9a-fk-orA-FK-OR]\s*(?=[A-Z])", "", s).strip()
     low = s.lower()
     if "mosquito" in low or "pest" in low:
         return "Mosquito"
