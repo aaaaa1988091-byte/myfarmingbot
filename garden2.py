@@ -62,6 +62,7 @@ _tablist_lock         = threading.Lock()
 _pet_switch_cooldown  = 0.0
 _pet_switching        = False
 _mosquito_switch_done = False   # 本週期是否已切過蚊子
+_current_pet_name     = ""
 
 # maingarden 注入的回呼（避免循環 import）
 # maingarden 呼叫 set_callbacks() 完成注入
@@ -251,6 +252,9 @@ def tablist_updater():
             info = get_tablist_info()
             with _tablist_lock:
                 _tablist_cache.update(info)
+            pet_name = info.get("pet_name") or ""
+            if pet_name:
+                set_current_pet(pet_name)
         except:
             pass
         time.sleep(0.1)
@@ -258,6 +262,10 @@ def tablist_updater():
 def get_tablist_cached() -> dict:
     with _tablist_lock:
         return _tablist_cache.copy()
+
+def set_current_pet(name: str):
+    global _current_pet_name
+    _current_pet_name = (name or "").strip()
 
 def _parse_cd_seconds(cd_str):
     """解析 CD 字串為秒數，READY 回傳 0，解析失敗回傳 None"""
@@ -275,6 +283,9 @@ def _parse_cd_seconds(cd_str):
 #  寵物切換
 # ────────────────────────────────────────────────
 def get_current_pet() -> str:
+    cached = _current_pet_name.strip()
+    if cached:
+        return cached
     return get_tablist_cached().get("pet_name") or ""
 
 def switch_pet_rod(reason=""):
@@ -295,6 +306,9 @@ def switch_pet_rod(reason=""):
         _pet_switch_cooldown = time.time()
         if reason:
             minescript.echo(f"§b[寵物] {reason} → 切換完成")
+        with _tablist_lock:
+            global _current_pet_name
+            _current_pet_name = ""
         time.sleep(random.uniform(0.1, 0.15))
         minescript.player_inventory_select_slot(2)
         if was_farming:
@@ -310,13 +324,6 @@ def pet_cd_monitor():
         try:
             raw_cd = get_tablist_cached().get("pest_cooldown")
             cd     = _parse_cd_seconds(raw_cd)
-            minescript.echo(
-                f"§7[CD-DBG] raw={raw_cd!r} parsed={cd} "
-                f"farm={_cb_get_farm_state()} pest={_cb_get_pest_busy()} "
-                f"patrol={_cb_get_patrol_state()} "
-                f"switching={_pet_switching} done={_mosquito_switch_done} "
-                f"pet={get_current_pet()}"
-            )
             farm_on   = _cb_get_farm_state() == "on"
             pest_idle = not _cb_get_pest_busy()
             patrol_ok = _cb_get_patrol_state() == PatrolState.IDLE
@@ -330,7 +337,6 @@ def pet_cd_monitor():
                         cur = get_current_pet()
                         if "Mosquito" not in cur and time.time() - _pet_switch_cooldown > PET_SWITCH_COOLDOWN:
                             _mosquito_switch_done = True
-                            minescript.echo(f"§b[寵物] CD=READY，當前={cur}，切換蚊子...")
                             _cb_log("寵物切換：蚊子（READY）")
                             threading.Thread(target=lambda: switch_pet_rod("READY切蚊子"), daemon=True).start()
                         elif "Mosquito" in cur:
@@ -339,13 +345,12 @@ def pet_cd_monitor():
                     cur = get_current_pet()
                     if "Mosquito" not in cur and time.time() - _pet_switch_cooldown > PET_SWITCH_COOLDOWN:
                         _mosquito_switch_done = True
-                        minescript.echo(f"§b[寵物] CD={cd}s，當前={cur}，切換蚊子...")
                         _cb_log(f"寵物切換：蚊子（CD={cd}s）")
                         threading.Thread(target=lambda: switch_pet_rod("CD切蚊子"), daemon=True).start()
                     elif "Mosquito" in cur:
                         _mosquito_switch_done = True
-        except Exception as e:
-            minescript.echo(f"§c[CD-DBG] 例外: {e}")
+        except Exception:
+            pass
         time.sleep(0.5)
 
 # ────────────────────────────────────────────────
@@ -413,6 +418,51 @@ def aote_smooth_look(ty, tp, steps=35):
         minescript.player_set_orientation(curr_y, curr_p)
         time.sleep(0.007)
 
+def wait_for_position_change(reference_pos=None, timeout=3.0, min_delta=0.75, poll_interval=0.05):
+    """等待伺服器座標真的更新，避免傳送延遲造成誤判。"""
+    if reference_pos is None:
+        try:
+            reference_pos = minescript.player_position()
+        except:
+            reference_pos = None
+    if reference_pos is None:
+        return None
+
+    deadline = time.time() + timeout
+    ref = tuple(reference_pos)
+    while time.time() < deadline:
+        try:
+            curr = tuple(minescript.player_position())
+        except:
+            time.sleep(poll_interval)
+            continue
+        if math.sqrt((curr[0] - ref[0]) ** 2 + (curr[1] - ref[1]) ** 2 + (curr[2] - ref[2]) ** 2) >= min_delta:
+            return curr
+        time.sleep(poll_interval)
+    return None
+
+def wait_for_position_stable(stable_seconds=0.4, timeout=3.0, poll_interval=0.05):
+    """等待座標在傳送後穩定下來。"""
+    deadline = time.time() + timeout
+    last = None
+    stable_since = None
+    while time.time() < deadline:
+        try:
+            curr = tuple(minescript.player_position())
+        except:
+            time.sleep(poll_interval)
+            continue
+        if curr == last:
+            if stable_since is None:
+                stable_since = time.time()
+            elif time.time() - stable_since >= stable_seconds:
+                return True
+        else:
+            last = curr
+            stable_since = None
+        time.sleep(poll_interval)
+    return False
+
 def _at_farm_origin(pos):
     """田道原點到達判定"""
     return int(pos[0]) <= -49 and int(pos[1]) == 67 and int(pos[2]) in (-145, -144)
@@ -447,7 +497,7 @@ def aote_navigate_to(goal, aote_slot=0, arrive_dist=0.9, max_iter=200):
         time.sleep(random.uniform(0.02, 0.05))
         minescript.player_press_use(True); time.sleep(random.uniform(0.02, 0.04))
         minescript.player_press_use(False)
-        new_curr = minescript.player_position()
+        new_curr = wait_for_position_change(curr, timeout=2.5, min_delta=0.6) or minescript.player_position()
         moved = math.sqrt(
             (new_curr[0]-curr[0])**2 + (new_curr[1]-curr[1])**2 + (new_curr[2]-curr[2])**2
         )
@@ -529,6 +579,7 @@ class PatrolBot:
     def start_single_plot(self, plot_num):
         with self._lock:
             if self.state != PatrolState.IDLE: return False
+            release_all(); stop_rclick_hold()
             self._stop_flag = False; self._done_event.clear()
             threading.Thread(target=self._single_plot_loop, args=(plot_num,), daemon=True).start()
             return True
@@ -536,6 +587,7 @@ class PatrolBot:
     def start(self):
         with self._lock:
             if self.state != PatrolState.IDLE: return False
+            release_all(); stop_rclick_hold()
             self._stop_flag = False; self._done_event.clear()
             threading.Thread(target=self._patrol_loop, daemon=True).start()
             return True
@@ -560,6 +612,7 @@ class PatrolBot:
 
     # ── 單 Plot 迴圈 ─────────────────────────
     def _single_plot_loop(self, plot_num):
+        release_all(); stop_rclick_hold()
         self.state = PatrolState.TRAVELING
         pending     = [plot_num]
         retry_count = {}
@@ -602,6 +655,7 @@ class PatrolBot:
 
     # ── 全 Plot 巡邏迴圈 ─────────────────────
     def _patrol_loop(self):
+        release_all(); stop_rclick_hold()
         self.state = PatrolState.TRAVELING
         try:
             _, pest_plots = get_pest_info()
@@ -643,25 +697,49 @@ class PatrolBot:
     # ── 移動至 Plot ──────────────────────────
     def _travel_to_plot(self, plot_num):
         self.state = PatrolState.TRAVELING
-        minescript.execute(f"/plottp {plot_num}"); time.sleep(1.5)
+        before_tp = minescript.player_position()
+        minescript.execute(f"/plottp {plot_num}")
+        wait_for_position_change(before_tp, timeout=6.0, min_delta=0.8)
+        wait_for_position_stable(stable_seconds=0.3, timeout=3.0)
         minescript.player_press_sneak(True)
-        end = time.time() + PATROL_SNEAK_SEC
-        while not self._stop_flag and time.time() < end: time.sleep(0.05)
+        stable_secs = random.uniform(1.0, 2.0)
+        base_y = self._wait_for_y_stable(stable_secs, timeout=10.0)
         minescript.player_press_sneak(False)
         if self._stop_flag: return
-        time.sleep(0.1)
+        if base_y is None:
+            minescript.echo("§e[Patrol] 等待落地穩定逾時，繼續嘗試")
+            base_y = minescript.player_position()[1]
+        target_h = base_y + 3.0
         for _retry in range(5):
             if self._stop_flag: return
-            ok = self._fly_to_height(FLY_HEIGHT)
+            ok = self._fly_to_height(target_h)
             if ok: break
             minescript.echo(f"§e[Patrol] 飛行失敗，重試... ({_retry+1}/5)")
             time.sleep(0.5)
         if self._stop_flag: return
-        time.sleep(0.2)
+        if not self._wait_for_y_stable(random.uniform(1.0, 2.0), timeout=10.0):
+            minescript.echo("§e[Patrol] 飛至目標高度後 Y 未穩定，繼續流程")
         if plot_num in PLOT_CENTERS:
             tx, tz = PLOT_CENTERS[plot_num]
-            minescript.echo(f"§7[Patrol] 移動至中心 X={tx:.0f} Z={tz:.0f}")
-            self._move_to_xz(tx, tz)
+            minescript.echo(f"§7[Patrol] AOTE 至中心 X={tx:.0f} Z={tz:.0f}")
+            self._aote_to_center(tx, tz)
+
+    def _wait_for_y_stable(self, stable_seconds, timeout=10.0, tolerance=0.05):
+        deadline = time.time() + timeout if timeout else None
+        last_y = None
+        stable_since = None
+        while not self._stop_flag:
+            y = minescript.player_position()[1]
+            now = time.time()
+            if last_y is None or abs(y - last_y) > tolerance:
+                last_y = y
+                stable_since = now
+            elif stable_since is not None and now - stable_since >= stable_seconds:
+                return y
+            if deadline is not None and now > deadline:
+                return None
+            time.sleep(0.05)
+        return None
 
     def _fly_to_height(self, target_h, tolerance=0.5):
         y = minescript.player_position()[1]
@@ -684,6 +762,26 @@ class PatrolBot:
         finally:
             minescript.player_press_jump(False)
         return False
+
+    def _aote_to_center(self, tx, tz):
+        if self._stop_flag:
+            return
+        minescript.player_press_forward(False)
+        minescript.player_press_sprint(False)
+        minescript.player_press_jump(False)
+        minescript.player_press_sneak(False)
+        p_pos = minescript.player_position()
+        ty_aim, tp_aim = calc_yaw_pitch(p_pos, (tx, p_pos[1], tz))
+        aote_smooth_look(ty_aim, tp_aim, steps=8)
+        stop_rclick_hold()
+        minescript.player_inventory_select_slot(0)
+        minescript.player_press_sprint(True)
+        minescript.player_press_use(True)
+        time.sleep(random.uniform(0.03, 0.06))
+        minescript.player_press_use(False)
+        time.sleep(random.uniform(0.02, 0.04))
+        minescript.player_inventory_select_slot(VACUUM_SLOT)
+        start_rclick_hold()
 
     def _move_to_xz(self, tx, tz, tolerance=4.5, timeout=20.0):
         deadline = time.time() + timeout
@@ -816,6 +914,7 @@ class PatrolBot:
             ori = minescript.player_orientation()
             if not ori: return "stop"
             cy, cp = ori[0], ori[1]
+            approach_stop_box = ARRIVE_BOX + 1.5
 
             # 近距：吸蟲
             if dist3d < ARRIVE_BOX:
@@ -835,6 +934,20 @@ class PatrolBot:
 
             in_range = False
 
+            # 接近距離：先停車，讓吸取範圍慢慢吃進去，避免衝過頭重複 AOTE
+            if dist3d <= approach_stop_box:
+                minescript.player_press_forward(False)
+                minescript.player_press_sprint(False)
+                minescript.player_press_jump(False)
+                minescript.player_press_sneak(False)
+                if _phase_log != "close":
+                    minescript.echo(f"§7[Patrol] 接近停車 dist={dist3d:.1f}")
+                    _phase_log = "close"
+                ny, np_ = self._aimer.tick(cy, cp, target_pos, p_pos)
+                minescript.player_set_orientation(ny, np_)
+                time.sleep(AIM_TICK_SEC + random.uniform(0, 0.004))
+                continue
+
             # 遠距：AOTE 傳送
             if dist3d > 12:
                 if _phase_log != "aote":
@@ -851,9 +964,12 @@ class PatrolBot:
                 ty_aim, tp_aim = calc_yaw_pitch(p_pos, (aim_x, aim_y, aim_z))
                 ty_aim += noise_y; tp_aim = clamp(tp_aim + noise_p, -70, 70)
                 aote_smooth_look(ty_aim, tp_aim, steps=8)
+                minescript.player_press_forward(False)
+                minescript.player_press_sprint(False)
+                minescript.player_press_jump(False)
+                minescript.player_press_sneak(False)
                 stop_rclick_hold()
                 minescript.player_inventory_select_slot(0)
-                minescript.player_press_sprint(True)
                 minescript.player_press_use(True);  time.sleep(random.uniform(0.03, 0.06))
                 minescript.player_press_use(False); time.sleep(random.uniform(0.02, 0.04))
                 minescript.player_inventory_select_slot(VACUUM_SLOT)
