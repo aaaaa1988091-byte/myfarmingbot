@@ -72,6 +72,8 @@ _chat_pest_enabled = False
 _pest_cd_switch_done = False
 _gear_switching = False
 _pest_cd_last_seen = None
+_current_equipment_set = None
+_pest_cd_block_logged = False
 PEST_SWITCH_THRESHOLD_SEC = 170  # 2m50s
 PEST_SWITCH_RESET_SEC = 190       # 回到較高冷卻時，允許下一輪再次切換
 
@@ -342,6 +344,19 @@ def _pet_target_label(target_pet: str) -> str:
     return target_pet
 
 
+def _normalize_equipment_set(name: str) -> str:
+    return (name or "").strip().lower()
+
+
+def _mark_equipment_set(set_name: str):
+    global _current_equipment_set
+    _current_equipment_set = _normalize_equipment_set(set_name) or None
+
+
+def _is_blossom_equipped() -> bool:
+    return _normalize_equipment_set(_current_equipment_set) == "blossom"
+
+
 def _pet_target_to_equip_set(target_pet: str) -> str:
     target = (target_pet or "").lower()
     if target in {"dragon", "rose", "blossom"}:
@@ -457,8 +472,10 @@ def _switch_pet_and_equip(
                 return False
             time.sleep(0.2)
 
+        target_set = _pet_target_to_equip_set(target_pet)
         try:
-            example.click_equipment_set(_pet_target_to_equip_set(target_pet))
+            example.click_equipment_set(target_set)
+            _mark_equipment_set(target_set)
         except Exception as e:
             minescript.echo(f"§c[寵物] 換裝失敗: {e}")
             log(f"換裝失敗: {e}")
@@ -480,6 +497,8 @@ def _switch_pet_and_equip(
 
 
 def get_pest_cd_display():
+    if not _is_blossom_equipped():
+        return "---"
     try:
         ui_cd = cd_var.get()
         if ui_cd and ui_cd != "---":
@@ -491,6 +510,8 @@ def get_pest_cd_display():
 
 
 def _get_pest_cd_text():
+    if not _is_blossom_equipped():
+        return None
     try:
         ui_cd = cd_var.get()
         if ui_cd and ui_cd != "---":
@@ -501,13 +522,23 @@ def _get_pest_cd_text():
 
 
 def pet_cd_monitor():
-    global _pest_cd_switch_done, _pest_cd_last_seen
+    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged
     while True:
         try:
+            farm_on = farm_state == "on"
+            if farm_on and not _is_blossom_equipped():
+                _pest_cd_switch_done = False
+                _pest_cd_last_seen = None
+                if not _pest_cd_block_logged:
+                    log("pest cooldown 偵測暫停：目前穿戴不是 blossom 套")
+                    _pest_cd_block_logged = True
+                time.sleep(0.5)
+                continue
+            _pest_cd_block_logged = False
+
             raw_cd = _get_pest_cd_text()
             raw_text = str(raw_cd or "")
             cd = _parse_cd_seconds(raw_cd)
-            farm_on = farm_state == "on"
             pest_idle = not _pest_busy
             patrol_ok = patrol_bot.state == PatrolState.IDLE
 
