@@ -74,7 +74,6 @@ _gear_switching = False
 _pest_cd_last_seen = None
 _current_equipment_set = None
 _pest_cd_block_logged = False
-_last_blossom_sync_attempt = 0.0
 _last_equipment_switch_at = 0.0
 PET_TABLIST_SETTLE_SECONDS = 3.0
 EQUIPMENT_SETTLE_SECONDS = 3.0
@@ -544,7 +543,7 @@ def _get_pest_cd_text():
 
 
 def pet_cd_monitor():
-    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged, _last_blossom_sync_attempt
+    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged
     while True:
         try:
             farm_on = farm_state == "on"
@@ -561,18 +560,12 @@ def pet_cd_monitor():
                         _pest_cd_block_logged = True
                     time.sleep(0.5)
                     continue
-                _pest_cd_switch_done = False
-                if pest_idle and patrol_ok and action_idle and time.time() - _last_blossom_sync_attempt >= 10.0:
-                    _last_blossom_sync_attempt = time.time()
-                    log("pest cooldown 偵測前同步 blossom 套")
-                    _switch_pet_and_equip(
-                        "dragon",
-                        "pest cooldown 偵測前確認 blossom 套",
-                        resume_farm=True,
-                        respect_pet_switch_cooldown=False,
-                    )
+                if pet_name_matches(current_pet, "Rose"):
+                    _mark_equipment_set("blossom")
+                    log("pest cooldown 偵測：目前寵物為 Rose，標記 blossom 套並等待狀態穩定")
                     time.sleep(0.5)
                     continue
+                _pest_cd_switch_done = False
                 if not _pest_cd_block_logged:
                     log("pest cooldown 偵測暫停：目前穿戴不是 blossom 套")
                     _pest_cd_block_logged = True
