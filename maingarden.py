@@ -503,11 +503,6 @@ def _switch_pet_and_equip(
             minescript.echo(f"§e[寵物] 唱片清理失敗，繼續下一步: {e}")
             log(f"唱片清理失敗: {e}")
 
-        settle_wait = _equipment_settle_remaining()
-        if settle_wait > 0:
-            log(f"換裝畫面處理完成，等待 {settle_wait:.1f}s 讓 tablist/裝備狀態更新")
-            time.sleep(settle_wait)
-
     finally:
         _gear_switching = False
 
