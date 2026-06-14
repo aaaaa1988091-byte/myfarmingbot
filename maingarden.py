@@ -72,6 +72,11 @@ _chat_pest_enabled = False
 _pest_cd_switch_done = False
 _gear_switching = False
 _pest_cd_last_seen = None
+_current_equipment_set = None
+_pest_cd_block_logged = False
+_last_equipment_switch_at = 0.0
+PET_TABLIST_SETTLE_SECONDS = 3.0
+EQUIPMENT_SETTLE_SECONDS = 3.0
 PEST_SWITCH_THRESHOLD_SEC = 170  # 2m50s
 PEST_SWITCH_RESET_SEC = 190       # 回到較高冷卻時，允許下一輪再次切換
 
@@ -342,6 +347,25 @@ def _pet_target_label(target_pet: str) -> str:
     return target_pet
 
 
+def _normalize_equipment_set(name: str) -> str:
+    return (name or "").strip().lower()
+
+
+def _mark_equipment_set(set_name: str):
+    global _current_equipment_set, _last_equipment_switch_at
+    _current_equipment_set = _normalize_equipment_set(set_name) or None
+    _last_equipment_switch_at = time.time()
+
+
+def _equipment_settle_remaining() -> float:
+    elapsed = time.time() - _last_equipment_switch_at
+    return max(0.0, EQUIPMENT_SETTLE_SECONDS - elapsed)
+
+
+def _is_blossom_equipped() -> bool:
+    return _normalize_equipment_set(_current_equipment_set) == "blossom"
+
+
 def _pet_target_to_equip_set(target_pet: str) -> str:
     target = (target_pet or "").lower()
     if target in {"dragon", "rose", "blossom"}:
@@ -432,7 +456,7 @@ def _switch_pet_and_equip(
                 switch_started = time.time()
                 before_pet = get_current_pet()
                 switch_pet_rod(reason or f"切換 {target_label}")
-                deadline = switch_started + 4.0
+                deadline = switch_started + max(4.0, PET_TABLIST_SETTLE_SECONDS + 1.0)
                 while time.time() < deadline:
                     chat_pet = _chat_confirmed_pet_since(switch_started, target_label)
                     if chat_pet:
@@ -443,6 +467,13 @@ def _switch_pet_and_equip(
                         else:
                             minescript.echo(f"§e[寵物] chat 確認目前是 {chat_pet}，不是 {target_label}，重試")
                         break
+                    if time.time() - switch_started >= PET_TABLIST_SETTLE_SECONDS:
+                        tab_pet = get_current_pet()
+                        if pet_name_matches(tab_pet, target_label):
+                            last_pet = tab_pet
+                            detected = True
+                            minescript.echo(f"§a[寵物] tablist 確認 {tab_pet}，開始換裝")
+                            break
                     time.sleep(0.05)
                 if detected:
                     break
@@ -457,8 +488,10 @@ def _switch_pet_and_equip(
                 return False
             time.sleep(0.2)
 
+        target_set = _pet_target_to_equip_set(target_pet)
         try:
-            example.click_equipment_set(_pet_target_to_equip_set(target_pet))
+            example.click_equipment_set(target_set)
+            _mark_equipment_set(target_set)
         except Exception as e:
             minescript.echo(f"§c[寵物] 換裝失敗: {e}")
             log(f"換裝失敗: {e}")
@@ -470,6 +503,11 @@ def _switch_pet_and_equip(
             minescript.echo(f"§e[寵物] 唱片清理失敗，繼續下一步: {e}")
             log(f"唱片清理失敗: {e}")
 
+        settle_wait = _equipment_settle_remaining()
+        if settle_wait > 0:
+            log(f"換裝畫面處理完成，等待 {settle_wait:.1f}s 讓 tablist/裝備狀態更新")
+            time.sleep(settle_wait)
+
     finally:
         _gear_switching = False
 
@@ -480,6 +518,8 @@ def _switch_pet_and_equip(
 
 
 def get_pest_cd_display():
+    if not _is_blossom_equipped():
+        return "---"
     try:
         ui_cd = cd_var.get()
         if ui_cd and ui_cd != "---":
@@ -491,6 +531,8 @@ def get_pest_cd_display():
 
 
 def _get_pest_cd_text():
+    if not _is_blossom_equipped():
+        return None
     try:
         ui_cd = cd_var.get()
         if ui_cd and ui_cd != "---":
@@ -501,17 +543,46 @@ def _get_pest_cd_text():
 
 
 def pet_cd_monitor():
-    global _pest_cd_switch_done, _pest_cd_last_seen
+    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged
     while True:
         try:
-            raw_cd = _get_pest_cd_text()
-            raw_text = str(raw_cd or "")
-            cd = _parse_cd_seconds(raw_cd)
             farm_on = farm_state == "on"
             pest_idle = not _pest_busy
             patrol_ok = patrol_bot.state == PatrolState.IDLE
+            action_idle = not g2._pet_switching and not _gear_switching and not major_action_busy()
 
-            if not (farm_on and pest_idle and patrol_ok and not g2._pet_switching and not major_action_busy()):
+            if farm_on and not _is_blossom_equipped():
+                _pest_cd_last_seen = None
+                current_pet = get_current_pet()
+                if _pest_cd_switch_done or "Mosquito" in current_pet:
+                    if not _pest_cd_block_logged:
+                        log("pest cooldown 已切換 Pesthunters，暫停偵測直到重新穿回 blossom 套")
+                        _pest_cd_block_logged = True
+                    time.sleep(0.5)
+                    continue
+                if pet_name_matches(current_pet, "Rose"):
+                    _mark_equipment_set("blossom")
+                    log("pest cooldown 偵測：目前寵物為 Rose，標記 blossom 套並等待狀態穩定")
+                    time.sleep(0.5)
+                    continue
+                _pest_cd_switch_done = False
+                if not _pest_cd_block_logged:
+                    log("pest cooldown 偵測暫停：目前穿戴不是 blossom 套")
+                    _pest_cd_block_logged = True
+                time.sleep(0.5)
+                continue
+            _pest_cd_block_logged = False
+
+            settle_wait = _equipment_settle_remaining()
+            if settle_wait > 0:
+                time.sleep(min(0.5, settle_wait))
+                continue
+
+            raw_cd = _get_pest_cd_text()
+            raw_text = str(raw_cd or "")
+            cd = _parse_cd_seconds(raw_cd)
+
+            if not (farm_on and pest_idle and patrol_ok and action_idle):
                 _pest_cd_switch_done = False
                 _pest_cd_last_seen = None
                 time.sleep(0.5)
@@ -1031,14 +1102,12 @@ def chat_listener_loop():
                     continue
                 minescript.echo(f"§a[ChatPest] Plot {plot_num} 有蟲！準備除蟲")
                 log(f"ChatPest：Plot {plot_num}")
-                # 蟲生成 → 切玫瑰龍（同步執行，避免漏切）
-                cur = get_current_pet()
-                if not pet_name_matches(cur, "Rose"):
-                    _switch_pet_and_equip(
-                        "dragon",
-                        "蟲出現切玫瑰龍",
-                        respect_pet_switch_cooldown=False,
-                    )
+                # 蟲生成 → 一律走共用切寵/換裝確認流程，避免快取寵物資訊誤判而漏切。
+                _switch_pet_and_equip(
+                    "dragon",
+                    "蟲出現切玫瑰龍",
+                    respect_pet_switch_cooldown=False,
+                )
                 threading.Thread(target=chat_pest_run, args=(plot_num,), daemon=True).start()
             except Exception as e:
                 minescript.echo(f"§c[ChatPest] 處理訊息出錯: {e}")
