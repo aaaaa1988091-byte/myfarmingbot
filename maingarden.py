@@ -323,7 +323,9 @@ def _parse_cd_seconds(raw_cd):
     s = str(raw_cd).strip()
     if not s:
         return None
-    if "READY" in s.upper():
+    ready_text = re.sub(r"§[0-9a-fk-orA-FK-OR]", "", s).strip()
+    ready_text = re.sub(r"\s+", " ", ready_text).upper()
+    if ready_text in {"READY", "READY!"}:
         return 0
     total = 0
     found = False
@@ -336,6 +338,12 @@ def _parse_cd_seconds(raw_cd):
         total += int(m.group(1))
         found = True
     return total if found else None
+
+
+def _is_cd_ready_text(cd_text) -> bool:
+    text = re.sub(r"§[0-9a-fk-orA-FK-OR]", "", str(cd_text or "")).strip()
+    text = re.sub(r"\s+", " ", text).upper()
+    return text in {"READY", "READY!"}
 
 
 def _pet_target_label(target_pet: str) -> str:
@@ -515,12 +523,6 @@ def _switch_pet_and_equip(
 def get_pest_cd_display():
     if not _is_blossom_equipped():
         return "---"
-    try:
-        ui_cd = cd_var.get()
-        if ui_cd and ui_cd != "---":
-            return ui_cd
-    except Exception:
-        pass
     raw_cd = g2.get_tablist_cached().get("pest_cooldown")
     return raw_cd or "---"
 
@@ -528,12 +530,6 @@ def get_pest_cd_display():
 def _get_pest_cd_text():
     if not _is_blossom_equipped():
         return None
-    try:
-        ui_cd = cd_var.get()
-        if ui_cd and ui_cd != "---":
-            return ui_cd
-    except Exception:
-        pass
     return g2.get_tablist_cached().get("pest_cooldown")
 
 
@@ -590,7 +586,7 @@ def pet_cd_monitor():
                 continue
 
             current_pet = get_current_pet()
-            ready_now = "READY" in raw_text.upper()
+            ready_now = _is_cd_ready_text(raw_cd)
             if cd >= PEST_SWITCH_RESET_SEC:
                 _pest_cd_switch_done = False
                 _pest_cd_last_seen = cd
@@ -598,7 +594,13 @@ def pet_cd_monitor():
                 continue
 
             if _pest_cd_last_seen != cd:
-                log(f"pest cooldown raw={raw_cd!r}, parsed={cd}")
+                log(
+                    "pest cooldown 偵測詳情: "
+                    f"raw={raw_cd!r}, normalized={raw_text!r}, parsed_seconds={cd}, "
+                    f"ready_exact={ready_now}, current_pet={current_pet!r}, "
+                    f"equipment={_current_equipment_set!r}, switch_done={_pest_cd_switch_done}, "
+                    f"farm_on={farm_on}, pest_idle={pest_idle}, patrol_ok={patrol_ok}, action_idle={action_idle}"
+                )
                 _pest_cd_last_seen = cd
 
             if ready_now and not _pest_cd_switch_done:
@@ -967,7 +969,7 @@ def pest_run():
             if _bot_generation != my_gen: return
             _switch_pet_and_equip(
                 "dragon",
-                "???????",
+                "除蟲開始前切玫瑰龍",
                 respect_pet_switch_cooldown=False,
             )
         minescript.echo("§b[/pest] 開始除蟲..."); log("/pest：開始除蟲")
@@ -1030,7 +1032,7 @@ def chat_pest_run(plot_num):
             if _bot_generation != my_gen: return
             _switch_pet_and_equip(
                 "dragon",
-                "???????",
+                "除蟲開始前切玫瑰龍",
                 respect_pet_switch_cooldown=False,
             )
         minescript.echo(f"§b[ChatPest] 前往 Plot {plot_num} 除蟲...")
