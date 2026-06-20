@@ -591,9 +591,14 @@ def pet_cd_monitor():
             ready_now = raw_ready
             local_cd = _get_pest_cd_remaining()
             if ready_now and local_cd > 0:
+                log(
+                    "pest cooldown 收到伺服器 READY，立即結束本地倒計時: "
+                    f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, previous_local_remaining={local_cd}"
+                )
                 _pest_cd_countdown_end = time.time()
                 local_cd = 0
-            cd = 0 if ready_now else local_cd
+            predicted_ready = local_cd <= 0
+            cd = 0 if (ready_now or predicted_ready) else local_cd
 
             if not (farm_on and pest_idle and patrol_ok and action_idle):
                 _pest_cd_last_seen = None
@@ -605,21 +610,20 @@ def pet_cd_monitor():
                 log(
                     "pest cooldown 本地倒計時詳情: "
                     f"server_raw={raw_cd!r}, server_ready_text={raw_ready}, server_ready_effective={ready_now}, tab_age={tab_age:.2f}, "
-                    f"local_remaining={local_cd}, display_cd={cd}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}, "
+                    f"local_remaining={local_cd}, predicted_ready={predicted_ready}, display_cd={cd}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}, "
                     f"switch_done={_pest_cd_switch_done}, farm_on={farm_on}, pest_idle={pest_idle}, "
                     f"patrol_ok={patrol_ok}, action_idle={action_idle}"
                 )
                 _pest_cd_last_seen = cd
 
-            should_switch = ready_now
-            if local_cd <= 0 and not ready_now and not _pest_cd_switch_done:
+            should_switch = ready_now or predicted_ready
+            if predicted_ready and not ready_now and not _pest_cd_switch_done:
                 log(
-                    "pest cooldown 本地倒計時預測 READY，伺服器尚未顯示 READY，暫緩 5 秒等待確認: "
+                    "pest cooldown 本地倒計時預測 READY，允許切蚊子: "
                     f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}"
                 )
-                _pest_cd_countdown_end = time.time() + 5.0
             if should_switch and not _pest_cd_switch_done:
-                trigger = "READY" if ready_now else "本地倒計時歸零"
+                trigger = "伺服器READY" if ready_now else "本地倒計時預測READY"
                 if "Mosquito" not in current_pet:
                     minescript.echo(f"§e[寵物] pest cooldown {trigger}，切換蚊子+Pesthunters")
                     log(f"寵物切換：{trigger}，切換蚊子+Pesthunters")
