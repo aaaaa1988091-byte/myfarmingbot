@@ -58,6 +58,7 @@ PET_SWITCH_COOLDOWN = 4.0    # tablist 3 秒刷新 + 1 秒緩衝
 # ────────────────────────────────────────────────
 # 這些是 garden2 內部私有狀態
 _tablist_cache: dict = {}
+_tablist_updated_at = 0.0
 _tablist_lock         = threading.Lock()
 _pet_switch_cooldown  = 0.0
 _pet_switching        = False
@@ -252,8 +253,11 @@ def tablist_updater():
     while True:
         try:
             info = get_tablist_info()
+            global _tablist_updated_at
             with _tablist_lock:
+                info["_updated_at"] = time.time()
                 _tablist_cache.update(info)
+                _tablist_updated_at = info["_updated_at"]
             pet_name = info.get("pet_name") or ""
             if pet_name:
                 set_current_pet(pet_name, source="tablist")
@@ -264,6 +268,11 @@ def tablist_updater():
 def get_tablist_cached() -> dict:
     with _tablist_lock:
         return _tablist_cache.copy()
+
+def get_tablist_cache_age() -> float:
+    with _tablist_lock:
+        updated_at = _tablist_cache.get("_updated_at") or _tablist_updated_at
+    return time.time() - updated_at if updated_at else float("inf")
 
 def normalize_pet_name(name: str) -> str:
     """把 tablist/chat 裡不同格式的寵物名稱正規化，方便切換偵測比對。"""
@@ -289,9 +298,15 @@ def set_current_pet(name: str, source: str = "manual"):
     normalized = normalize_pet_name(name)
     if not normalized:
         return
+    previous = _current_pet_name
     _current_pet_name = normalized
     _current_pet_updated_at = time.time()
     _current_pet_source = source
+    if previous != normalized:
+        try:
+            _cb_log(f"寵物偵測更新: source={source}, raw={name!r}, normalized={normalized!r}, previous={previous!r}")
+        except Exception:
+            pass
 
 def get_current_pet_meta() -> dict:
     return {
@@ -300,21 +315,31 @@ def get_current_pet_meta() -> dict:
         "source": _current_pet_source,
     }
 
-def wait_for_pet_detection(target: str = "", previous: str = "", timeout: float = 5.0, poll_interval: float = 0.1) -> bool:
-    """等待 tablist/chat 確認寵物切換。target 有值時等待指定寵物；否則等待寵物與 previous 不同。"""
+def wait_for_pet_detection_detail(target: str = "", previous: str = "", since: float = 0.0, timeout: float = 5.0, poll_interval: float = 0.1) -> dict:
+    """等待與 pest cooldown 相同來源（chat/tablist 快取）確認寵物；回傳偵測細節供除錯。"""
     deadline = time.time() + timeout
     prev_norm = normalize_pet_name(previous).lower()
+    target_norm = normalize_pet_name(target).lower()
+    last = {}
     while time.time() < deadline:
-        cur = get_current_pet()
-        if target:
-            if pet_name_matches(cur, target):
-                return True
-        else:
-            cur_norm = normalize_pet_name(cur).lower()
-            if cur_norm and cur_norm != prev_norm:
-                return True
+        meta = get_current_pet_meta()
+        cur = meta.get("name") or get_current_pet()
+        cur_norm = normalize_pet_name(cur).lower()
+        last = {"ok": False, "name": cur, "source": meta.get("source") or "cache", "updated_at": meta.get("updated_at") or 0.0}
+        is_new_enough = not since or last["updated_at"] >= since
+        if target_norm:
+            if is_new_enough and pet_name_matches(cur, target):
+                last["ok"] = True
+                return last
+        elif is_new_enough and cur_norm and cur_norm != prev_norm:
+            last["ok"] = True
+            return last
         time.sleep(poll_interval)
-    return False
+    return last or {"ok": False, "name": get_current_pet(), "source": "timeout", "updated_at": 0.0}
+
+def wait_for_pet_detection(target: str = "", previous: str = "", timeout: float = 5.0, poll_interval: float = 0.1) -> bool:
+    """等待 tablist/chat 確認寵物切換。target 有值時等待指定寵物；否則等待寵物與 previous 不同。"""
+    return bool(wait_for_pet_detection_detail(target, previous, 0.0, timeout, poll_interval).get("ok"))
 
 def _parse_cd_seconds(cd_str):
     """解析 CD 字串為秒數，READY 回傳 0，解析失敗回傳 None"""

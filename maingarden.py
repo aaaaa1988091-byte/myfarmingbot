@@ -35,9 +35,9 @@ from garden2 import (
     capture_minecraft, clamp, dist3,
     aote_navigate_to, aote_smooth_look,
     # tablist
-    tablist_updater, get_tablist_cached,
+    tablist_updater, get_tablist_cached, get_tablist_cache_age,
     # 寵物
-    get_current_pet, switch_pet_rod, pet_cd_monitor, pet_name_matches,
+    get_current_pet, switch_pet_rod, pet_cd_monitor, pet_name_matches, wait_for_pet_detection_detail,
     # 除蟲
     PatrolBot, PatrolState,
     # 聊天工具
@@ -464,25 +464,23 @@ def _switch_pet_and_equip(
                 switch_started = time.time()
                 before_pet = get_current_pet()
                 switch_pet_rod(reason or f"切換 {target_label}")
-                deadline = switch_started + max(4.0, PET_TABLIST_SETTLE_SECONDS + 1.0)
-                while time.time() < deadline:
-                    chat_pet = _chat_confirmed_pet_since(switch_started, target_label)
-                    if chat_pet:
-                        last_pet = chat_pet
-                        if pet_name_matches(chat_pet, target_label):
-                            detected = True
-                            minescript.echo(f"§a[寵物] chat 確認 {chat_pet}，開始換裝")
-                        else:
-                            minescript.echo(f"§e[寵物] chat 確認目前是 {chat_pet}，不是 {target_label}，重試")
-                        break
-                    if time.time() - switch_started >= PET_TABLIST_SETTLE_SECONDS:
-                        tab_pet = get_current_pet()
-                        if pet_name_matches(tab_pet, target_label):
-                            last_pet = tab_pet
-                            detected = True
-                            minescript.echo(f"§a[寵物] tablist 確認 {tab_pet}，開始換裝")
-                            break
-                    time.sleep(0.05)
+                detail = wait_for_pet_detection_detail(
+                    target=target_label,
+                    previous=before_pet,
+                    since=switch_started,
+                    timeout=max(4.0, PET_TABLIST_SETTLE_SECONDS + 1.0),
+                    poll_interval=0.05,
+                )
+                last_pet = detail.get("name") or last_pet
+                log(
+                    "寵物切換偵測詳情: "
+                    f"attempt={attempt}, target={target_label}, before={before_pet!r}, "
+                    f"detected={detail.get('ok')}, after={last_pet!r}, source={detail.get('source')}, "
+                    f"updated_at={detail.get('updated_at')}, switch_started={switch_started}"
+                )
+                if detail.get("ok"):
+                    detected = True
+                    minescript.echo(f"§a[寵物] {detail.get('source')} 確認 {last_pet}，開始換裝")
                 if detected:
                     break
                 if not last_pet:
@@ -551,7 +549,7 @@ def get_pest_cd_display():
 
 
 def pet_cd_monitor():
-    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged
+    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged, _pest_cd_countdown_end
     while True:
         try:
             farm_on = farm_state == "on"
@@ -586,9 +584,12 @@ def pet_cd_monitor():
                 time.sleep(min(0.5, settle_wait))
                 continue
 
-            raw_cd = g2.get_tablist_cached().get("pest_cooldown")
-            ready_now = _is_cd_ready_text(raw_cd)
-            cd = 0 if ready_now else _get_pest_cd_remaining()
+            tab_cache = g2.get_tablist_cached()
+            raw_cd = tab_cache.get("pest_cooldown")
+            tab_age = get_tablist_cache_age()
+            ready_now = _is_cd_ready_text(raw_cd) and tab_age <= 2.0
+            local_cd = _get_pest_cd_remaining()
+            cd = 0 if ready_now else local_cd
 
             if not (farm_on and pest_idle and patrol_ok and action_idle):
                 _pest_cd_last_seen = None
@@ -599,14 +600,20 @@ def pet_cd_monitor():
             if _pest_cd_last_seen != cd:
                 log(
                     "pest cooldown 本地倒計時詳情: "
-                    f"server_raw={raw_cd!r}, server_ready_exact={ready_now}, local_remaining={cd}, "
-                    f"current_pet={current_pet!r}, equipment={_current_equipment_set!r}, "
+                    f"server_raw={raw_cd!r}, server_ready_exact={ready_now}, tab_age={tab_age:.2f}, "
+                    f"local_remaining={local_cd}, display_cd={cd}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}, "
                     f"switch_done={_pest_cd_switch_done}, farm_on={farm_on}, pest_idle={pest_idle}, "
                     f"patrol_ok={patrol_ok}, action_idle={action_idle}"
                 )
                 _pest_cd_last_seen = cd
 
-            should_switch = ready_now or cd <= 0
+            should_switch = ready_now
+            if local_cd <= 0 and not ready_now and not _pest_cd_switch_done:
+                log(
+                    "pest cooldown 本地倒計時歸零但伺服器未 READY，禁止切蚊子: "
+                    f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}"
+                )
+                _pest_cd_countdown_end = time.time() + 5.0
             if should_switch and not _pest_cd_switch_done:
                 trigger = "READY" if ready_now else "本地倒計時歸零"
                 if "Mosquito" not in current_pet:
@@ -1091,11 +1098,12 @@ def chat_listener_loop():
                 minescript.echo(f"§a[ChatPest] Plot {plot_num} 有蟲！準備除蟲")
                 log(f"ChatPest：Plot {plot_num}")
                 # 蟲生成 → 一律走共用切寵/換裝確認流程，避免快取寵物資訊誤判而漏切。
-                _switch_pet_and_equip(
+                switch_ok = _switch_pet_and_equip(
                     "dragon",
                     "蟲出現切玫瑰龍",
                     respect_pet_switch_cooldown=False,
                 )
+                log(f"ChatPest：蟲生成切玫瑰龍結果={switch_ok}, current_pet={get_current_pet()!r}")
                 threading.Thread(target=chat_pest_run, args=(plot_num,), daemon=True).start()
             except Exception as e:
                 minescript.echo(f"§c[ChatPest] 處理訊息出錯: {e}")
