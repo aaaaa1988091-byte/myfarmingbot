@@ -76,6 +76,7 @@ _current_equipment_set = None
 _pest_cd_block_logged = False
 _last_equipment_switch_at = 0.0
 _pest_cd_countdown_end = 0.0
+_pest_cd_ignore_ready_before = 0.0
 PET_TABLIST_SETTLE_SECONDS = 3.0
 EQUIPMENT_SETTLE_SECONDS = 3.0
 PEST_LOCAL_COOLDOWN_SEC = 130  # 2分10秒，本地倒計時；伺服器時間只接受 READY
@@ -519,11 +520,16 @@ def _switch_pet_and_equip(
 
 
 def _reset_pest_cd_countdown(reason: str):
-    global _pest_cd_countdown_end, _pest_cd_switch_done, _pest_cd_last_seen
-    _pest_cd_countdown_end = time.time() + PEST_LOCAL_COOLDOWN_SEC
+    global _pest_cd_countdown_end, _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_ignore_ready_before
+    reset_at = time.time()
+    _pest_cd_countdown_end = reset_at + PEST_LOCAL_COOLDOWN_SEC
+    _pest_cd_ignore_ready_before = reset_at
     _pest_cd_switch_done = False
     _pest_cd_last_seen = None
-    log(f"pest cooldown 本地倒計時重置: reason={reason}, seconds={PEST_LOCAL_COOLDOWN_SEC}")
+    log(
+        f"pest cooldown 本地倒計時重置: reason={reason}, seconds={PEST_LOCAL_COOLDOWN_SEC}, "
+        f"ignore_ready_before={_pest_cd_ignore_ready_before}"
+    )
 
 
 def _get_pest_cd_remaining() -> int:
@@ -542,14 +548,16 @@ def _format_pest_cd_remaining(seconds: int) -> str:
 def get_pest_cd_display():
     if not _is_blossom_equipped():
         return "---"
-    raw_cd = g2.get_tablist_cached().get("pest_cooldown")
-    if _is_cd_ready_text(raw_cd):
+    tab_cache = g2.get_tablist_cached()
+    raw_cd = tab_cache.get("pest_cooldown")
+    tab_updated_at = tab_cache.get("_updated_at") or 0.0
+    if _is_cd_ready_text(raw_cd) and tab_updated_at >= _pest_cd_ignore_ready_before:
         return "READY"
     return _format_pest_cd_remaining(_get_pest_cd_remaining())
 
 
 def pet_cd_monitor():
-    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged, _pest_cd_countdown_end
+    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged, _pest_cd_countdown_end, _pest_cd_ignore_ready_before
     while True:
         try:
             farm_on = farm_state == "on"
@@ -586,14 +594,17 @@ def pet_cd_monitor():
 
             tab_cache = g2.get_tablist_cached()
             raw_cd = tab_cache.get("pest_cooldown")
+            tab_updated_at = tab_cache.get("_updated_at") or 0.0
             tab_age = get_tablist_cache_age()
             raw_ready = _is_cd_ready_text(raw_cd)
-            ready_now = raw_ready
+            stale_ready_after_reset = bool(raw_ready and tab_updated_at < _pest_cd_ignore_ready_before)
+            ready_now = raw_ready and not stale_ready_after_reset
             local_cd = _get_pest_cd_remaining()
             if ready_now and local_cd > 0:
                 log(
                     "pest cooldown 收到伺服器 READY，立即結束本地倒計時: "
-                    f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, previous_local_remaining={local_cd}"
+                    f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, tab_updated_at={tab_updated_at}, "
+                    f"previous_local_remaining={local_cd}"
                 )
                 _pest_cd_countdown_end = time.time()
                 local_cd = 0
@@ -609,8 +620,10 @@ def pet_cd_monitor():
             if _pest_cd_last_seen != cd:
                 log(
                     "pest cooldown 本地倒計時詳情: "
-                    f"server_raw={raw_cd!r}, server_ready_text={raw_ready}, server_ready_effective={ready_now}, tab_age={tab_age:.2f}, "
-                    f"local_remaining={local_cd}, predicted_ready={predicted_ready}, display_cd={cd}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}, "
+                    f"server_raw={raw_cd!r}, server_ready_text={raw_ready}, server_ready_effective={ready_now}, "
+                    f"stale_ready_after_reset={stale_ready_after_reset}, tab_age={tab_age:.2f}, tab_updated_at={tab_updated_at}, "
+                    f"ignore_ready_before={_pest_cd_ignore_ready_before}, local_remaining={local_cd}, "
+                    f"predicted_ready={predicted_ready}, display_cd={cd}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}, "
                     f"switch_done={_pest_cd_switch_done}, farm_on={farm_on}, pest_idle={pest_idle}, "
                     f"patrol_ok={patrol_ok}, action_idle={action_idle}"
                 )
@@ -620,7 +633,8 @@ def pet_cd_monitor():
             if predicted_ready and not ready_now and not _pest_cd_switch_done:
                 log(
                     "pest cooldown 本地倒計時預測 READY，允許切蚊子: "
-                    f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}"
+                    f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, stale_ready_after_reset={stale_ready_after_reset}, "
+                    f"current_pet={current_pet!r}, equipment={_current_equipment_set!r}"
                 )
             if should_switch and not _pest_cd_switch_done:
                 trigger = "伺服器READY" if ready_now else "本地倒計時預測READY"
@@ -1105,13 +1119,8 @@ def chat_listener_loop():
                     continue
                 minescript.echo(f"§a[ChatPest] Plot {plot_num} 有蟲！準備除蟲")
                 log(f"ChatPest：Plot {plot_num}")
-                # 蟲生成 → 一律走共用切寵/換裝確認流程，避免快取寵物資訊誤判而漏切。
-                switch_ok = _switch_pet_and_equip(
-                    "dragon",
-                    "蟲出現切玫瑰龍",
-                    respect_pet_switch_cooldown=False,
-                )
-                log(f"ChatPest：蟲生成切玫瑰龍結果={switch_ok}, current_pet={get_current_pet()!r}")
+                # 只排程除蟲；不要在等待延遲期間開 UI 換裝，否則會 release_all/stop_farm_keys 讓農業卡住。
+                log(f"ChatPest：已排程 Plot {plot_num}，延遲結束後才暫停農業並切寵")
                 threading.Thread(target=chat_pest_run, args=(plot_num,), daemon=True).start()
             except Exception as e:
                 minescript.echo(f"§c[ChatPest] 處理訊息出錯: {e}")
