@@ -37,24 +37,15 @@ DEFAULT_BLOCKS = [
 ]
 
 DEFAULT_WORKFLOWS = {
-    "農業啟動前置": [
+    "主工作流": [
         {"action": "switch_dragon"},
         {"action": "farm_entry_actions"},
         {"action": "start_farm_keys"},
-    ],
-    "除蟲前置": [
-        {"action": "stop_farm_keys"},
-        {"action": "switch_dragon"},
-        {"action": "pest_all"},
-    ],
-    "READY切蚊子": [
         {"action": "stop_farm_keys"},
         {"action": "switch_mosquito"},
         {"action": "sell_vinyl"},
-        {"action": "start_farm_keys"},
     ],
 }
-
 
 def load_workflows(path: str = WORKFLOW_FILE) -> dict:
     if not os.path.exists(path):

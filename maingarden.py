@@ -97,9 +97,9 @@ patrol_bot = PatrolBot()
 # ────────────────────────────────────────────────
 #  Tkinter UI（先宣告，log / update_button 需要）
 # ────────────────────────────────────────────────
-C  = {"bg":  "#1a2e1a", "bg2": "#223322", "bg3": "#2e4a2e",
-      "fg":  "#e8ff60", "dim": "#7db87d", "acc": "#aaff00",
-      "grn": "#39d353", "red": "#ff4f4f", "yel": "#ffe53b", "pur": "#c8ff00"}
+C  = {"bg":  "#0f172a", "bg2": "#111827", "bg3": "#1f2937",
+      "fg":  "#e5e7eb", "dim": "#94a3b8", "acc": "#38bdf8",
+      "grn": "#22c55e", "red": "#ef4444", "yel": "#f59e0b", "pur": "#a78bfa"}
 FM = ("Consolas", 8)
 FL = ("Consolas", 9, "bold")
 FB = ("Consolas", 9, "bold")
@@ -1362,13 +1362,14 @@ _selected_block = tk.StringVar(value=wfblocks.DEFAULT_BLOCKS[0].key)
 _workflow_editor = None
 _workflow_canvas = None
 _drag_block_index = None
+_drag_current_y = None
 
 _WORKFLOW_COLORS = {
-    "農業": ("#39d353", "#06220c"),
-    "換裝+寵物": ("#c8ff00", "#1a2e1a"),
-    "清理": ("#ffe53b", "#332700"),
-    "除蟲": ("#ff8c42", "#2b1200"),
-    "時間": ("#8e44ad", "#f4e6ff"),
+    "農業": ("#22c55e", "#052e16"),
+    "換裝+寵物": ("#38bdf8", "#082f49"),
+    "清理": ("#f59e0b", "#451a03"),
+    "除蟲": ("#f97316", "#431407"),
+    "時間": ("#a78bfa", "#2e1065"),
 }
 
 
@@ -1465,31 +1466,63 @@ def _workflow_move_index(idx: int, new_idx: int):
     _refresh_workflow_bar()
 
 
-def _workflow_canvas_index(y: int) -> int:
-    return max(0, min(len(_workflows.get(_selected_workflow.get(), [])) - 1, int((y - 16) // 46)))
+def _workflow_canvas_index(y: int, allow_end: bool = False) -> int:
+    count = len(_workflows.get(_selected_workflow.get(), []))
+    if count <= 0:
+        return 0
+    upper = count if allow_end else count - 1
+    return max(0, min(upper, int((y - 16) // 46)))
 
 
 def _on_workflow_press(ev):
-    global _drag_block_index
+    global _drag_block_index, _drag_current_y
     blocks = _workflows.get(_selected_workflow.get(), [])
     if not blocks:
         _drag_block_index = None
+        _drag_current_y = None
         return
     _drag_block_index = _workflow_canvas_index(ev.y)
+    _drag_current_y = ev.y
+    _redraw_workflow_canvas()
+
+
+def _on_workflow_motion(ev):
+    global _drag_current_y
+    if _drag_block_index is None:
+        return
+    _drag_current_y = ev.y
+    _redraw_workflow_canvas()
 
 
 def _on_workflow_release(ev):
-    global _drag_block_index
+    global _drag_block_index, _drag_current_y
     if _drag_block_index is None:
         return
-    _workflow_move_index(_drag_block_index, _workflow_canvas_index(ev.y))
+    _workflow_move_index(_drag_block_index, _workflow_canvas_index(ev.y, allow_end=True))
     _drag_block_index = None
-
+    _drag_current_y = None
+    _redraw_workflow_canvas()
 
 def _on_workflow_right_click(ev):
     blocks = _workflows.get(_selected_workflow.get(), [])
     if blocks:
         _workflow_delete_index(_workflow_canvas_index(ev.y))
+
+
+def _draw_workflow_block(idx: int, block: dict, y: int, ghost: bool = False):
+    action = block.get("action", "")
+    spec = _block_spec(action)
+    label = spec.label if spec else action
+    cat = spec.category if spec else "?"
+    bg, fg = _block_colors(action)
+    outline = "#f8fafc" if ghost else C["acc"]
+    shadow = "#020617"
+    if ghost:
+        _workflow_canvas.create_rectangle(20, y + 5, 446, y + 43, fill=shadow, outline="", stipple="gray50")
+    _workflow_canvas.create_rectangle(12, y, 438, y + 38, fill=bg, outline=outline, width=3 if ghost else 2)
+    _workflow_canvas.create_oval(4, y + 10, 22, y + 28, fill=bg, outline=outline, width=2)
+    _workflow_canvas.create_oval(428, y + 10, 446, y + 28, fill="#0f172a", outline=outline, width=2)
+    _workflow_canvas.create_text(30, y + 19, text=f"{idx + 1}. {cat}｜{label}", anchor="w", fill=fg, font=FL)
 
 
 def _redraw_workflow_canvas():
@@ -1500,18 +1533,19 @@ def _redraw_workflow_canvas():
     if not blocks:
         _workflow_canvas.create_text(18, 24, text="從左側 Palette 點擊積木加入工作流", anchor="w", fill=C["dim"], font=FM)
         return
+    insert_idx = _workflow_canvas_index(_drag_current_y or 0, allow_end=True) if _drag_block_index is not None else None
     for idx, block in enumerate(blocks):
-        action = block.get("action", "")
-        spec = _block_spec(action)
-        label = spec.label if spec else action
-        cat = spec.category if spec else "?"
-        bg, fg = _block_colors(action)
-        y = 16 + idx * 46
-        _workflow_canvas.create_rectangle(12, y, 430, y + 34, fill=bg, outline=C["acc"], width=2)
-        _workflow_canvas.create_oval(4, y + 8, 20, y + 24, fill=bg, outline=C["acc"], width=2)
-        _workflow_canvas.create_oval(422, y + 8, 438, y + 24, fill=C["bg2"], outline=C["acc"], width=2)
-        _workflow_canvas.create_text(28, y + 17, text=f"{idx + 1}. {cat}｜{label}", anchor="w", fill=fg, font=FL)
-    _workflow_canvas.configure(scrollregion=(0, 0, 460, max(230, 24 + len(blocks) * 46)))
+        if idx == _drag_block_index:
+            continue
+        y = 16 + idx * 48
+        _draw_workflow_block(idx, block, y)
+    if insert_idx is not None:
+        y_line = 12 + insert_idx * 48
+        _workflow_canvas.create_rectangle(10, y_line, 450, y_line + 4, fill="#f8fafc", outline="")
+    if _drag_block_index is not None and 0 <= _drag_block_index < len(blocks):
+        drag_y = max(10, (_drag_current_y or 40) - 19)
+        _draw_workflow_block(_drag_block_index, blocks[_drag_block_index], drag_y, ghost=True)
+    _workflow_canvas.configure(scrollregion=(0, 0, 470, max(240, 28 + len(blocks) * 48)))
 
 
 def _open_workflow_editor():
@@ -1521,7 +1555,7 @@ def _open_workflow_editor():
         return
     _workflow_editor = tk.Toplevel(tk_root)
     _workflow_editor.title("🧩 Workflow Blocks")
-    _workflow_editor.geometry("760x420")
+    _workflow_editor.geometry("820x460")
     _workflow_editor.configure(bg=C["bg"])
     _workflow_editor.attributes("-topmost", True)
 
@@ -1538,9 +1572,10 @@ def _open_workflow_editor():
     right = tk.Frame(_workflow_editor, bg=C["bg"], padx=8, pady=8)
     right.pack(side="left", fill="both", expand=True)
     tk.Label(right, text="拖曳右側積木即可排序；右鍵刪除", bg=C["bg"], fg=C["fg"], font=FL).pack(anchor="w")
-    _workflow_canvas = tk.Canvas(right, bg="#102010", highlightthickness=2, highlightbackground=C["acc"])
+    _workflow_canvas = tk.Canvas(right, bg="#020617", highlightthickness=2, highlightbackground=C["acc"])
     _workflow_canvas.pack(fill="both", expand=True, pady=6)
     _workflow_canvas.bind("<ButtonPress-1>", _on_workflow_press)
+    _workflow_canvas.bind("<B1-Motion>", _on_workflow_motion)
     _workflow_canvas.bind("<ButtonRelease-1>", _on_workflow_release)
     _workflow_canvas.bind("<Button-3>", _on_workflow_right_click)
 
