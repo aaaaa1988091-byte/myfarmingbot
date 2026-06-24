@@ -19,6 +19,7 @@ import asyncio
 
 # ── 載入函式庫 ──────────────────────────────────
 import garden2 as g2
+import workflow_blocks as wfblocks
 try:
     import example
 except Exception as e:
@@ -35,9 +36,9 @@ from garden2 import (
     capture_minecraft, clamp, dist3,
     aote_navigate_to, aote_smooth_look,
     # tablist
-    tablist_updater, get_tablist_cached,
+    tablist_updater, get_tablist_cached, get_tablist_cache_age,
     # 寵物
-    get_current_pet, switch_pet_rod, pet_cd_monitor, pet_name_matches,
+    get_current_pet, switch_pet_rod, pet_cd_monitor, pet_name_matches, wait_for_pet_detection_detail,
     # 除蟲
     PatrolBot, PatrolState,
     # 聊天工具
@@ -76,6 +77,7 @@ _current_equipment_set = None
 _pest_cd_block_logged = False
 _last_equipment_switch_at = 0.0
 _pest_cd_countdown_end = 0.0
+_pest_cd_ignore_ready_before = 0.0
 PET_TABLIST_SETTLE_SECONDS = 3.0
 EQUIPMENT_SETTLE_SECONDS = 3.0
 PEST_LOCAL_COOLDOWN_SEC = 130  # 2分10秒，本地倒計時；伺服器時間只接受 READY
@@ -95,9 +97,9 @@ patrol_bot = PatrolBot()
 # ────────────────────────────────────────────────
 #  Tkinter UI（先宣告，log / update_button 需要）
 # ────────────────────────────────────────────────
-C  = {"bg":  "#1a2e1a", "bg2": "#223322", "bg3": "#2e4a2e",
-      "fg":  "#e8ff60", "dim": "#7db87d", "acc": "#aaff00",
-      "grn": "#39d353", "red": "#ff4f4f", "yel": "#ffe53b", "pur": "#c8ff00"}
+C  = {"bg":  "#0f172a", "bg2": "#111827", "bg3": "#1f2937",
+      "fg":  "#e5e7eb", "dim": "#94a3b8", "acc": "#38bdf8",
+      "grn": "#22c55e", "red": "#ef4444", "yel": "#f59e0b", "pur": "#a78bfa"}
 FM = ("Consolas", 8)
 FL = ("Consolas", 9, "bold")
 FB = ("Consolas", 9, "bold")
@@ -188,6 +190,10 @@ tk.Frame(tk_root, bg=C["acc"], height=2).pack(fill="x")
 
 # ── 控制按鈕列（先預留，後面定義函數後再綁定）──
 cf = tk.Frame(tk_root, bg=C["bg"], pady=8); cf.pack(padx=10)
+
+# ── Scratch-like 工作流區（先放在日誌上方，後面定義函數後再填內容）──
+workflow_frame = tk.Frame(tk_root, bg=C["bg2"], pady=5, padx=8)
+workflow_frame.pack(fill="x", padx=8, pady=(0, 4))
 
 # ── 日誌框 ──────────────────────────────────────
 lf  = tk.Frame(tk_root, bg=C["bg"], pady=4, padx=8); lf.pack(fill="both", expand=True)
@@ -464,25 +470,23 @@ def _switch_pet_and_equip(
                 switch_started = time.time()
                 before_pet = get_current_pet()
                 switch_pet_rod(reason or f"切換 {target_label}")
-                deadline = switch_started + max(4.0, PET_TABLIST_SETTLE_SECONDS + 1.0)
-                while time.time() < deadline:
-                    chat_pet = _chat_confirmed_pet_since(switch_started, target_label)
-                    if chat_pet:
-                        last_pet = chat_pet
-                        if pet_name_matches(chat_pet, target_label):
-                            detected = True
-                            minescript.echo(f"§a[寵物] chat 確認 {chat_pet}，開始換裝")
-                        else:
-                            minescript.echo(f"§e[寵物] chat 確認目前是 {chat_pet}，不是 {target_label}，重試")
-                        break
-                    if time.time() - switch_started >= PET_TABLIST_SETTLE_SECONDS:
-                        tab_pet = get_current_pet()
-                        if pet_name_matches(tab_pet, target_label):
-                            last_pet = tab_pet
-                            detected = True
-                            minescript.echo(f"§a[寵物] tablist 確認 {tab_pet}，開始換裝")
-                            break
-                    time.sleep(0.05)
+                detail = wait_for_pet_detection_detail(
+                    target=target_label,
+                    previous=before_pet,
+                    since=switch_started,
+                    timeout=max(4.0, PET_TABLIST_SETTLE_SECONDS + 1.0),
+                    poll_interval=0.05,
+                )
+                last_pet = detail.get("name") or last_pet
+                log(
+                    "寵物切換偵測詳情: "
+                    f"attempt={attempt}, target={target_label}, before={before_pet!r}, "
+                    f"detected={detail.get('ok')}, after={last_pet!r}, source={detail.get('source')}, "
+                    f"updated_at={detail.get('updated_at')}, switch_started={switch_started}"
+                )
+                if detail.get("ok"):
+                    detected = True
+                    minescript.echo(f"§a[寵物] {detail.get('source')} 確認 {last_pet}，開始換裝")
                 if detected:
                     break
                 if not last_pet:
@@ -521,11 +525,16 @@ def _switch_pet_and_equip(
 
 
 def _reset_pest_cd_countdown(reason: str):
-    global _pest_cd_countdown_end, _pest_cd_switch_done, _pest_cd_last_seen
-    _pest_cd_countdown_end = time.time() + PEST_LOCAL_COOLDOWN_SEC
+    global _pest_cd_countdown_end, _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_ignore_ready_before
+    reset_at = time.time()
+    _pest_cd_countdown_end = reset_at + PEST_LOCAL_COOLDOWN_SEC
+    _pest_cd_ignore_ready_before = reset_at
     _pest_cd_switch_done = False
     _pest_cd_last_seen = None
-    log(f"pest cooldown 本地倒計時重置: reason={reason}, seconds={PEST_LOCAL_COOLDOWN_SEC}")
+    log(
+        f"pest cooldown 本地倒計時重置: reason={reason}, seconds={PEST_LOCAL_COOLDOWN_SEC}, "
+        f"ignore_ready_before={_pest_cd_ignore_ready_before}"
+    )
 
 
 def _get_pest_cd_remaining() -> int:
@@ -544,14 +553,16 @@ def _format_pest_cd_remaining(seconds: int) -> str:
 def get_pest_cd_display():
     if not _is_blossom_equipped():
         return "---"
-    raw_cd = g2.get_tablist_cached().get("pest_cooldown")
-    if _is_cd_ready_text(raw_cd):
+    tab_cache = g2.get_tablist_cached()
+    raw_cd = tab_cache.get("pest_cooldown")
+    tab_updated_at = tab_cache.get("_updated_at") or 0.0
+    if _is_cd_ready_text(raw_cd) and tab_updated_at >= _pest_cd_ignore_ready_before:
         return "READY"
     return _format_pest_cd_remaining(_get_pest_cd_remaining())
 
 
 def pet_cd_monitor():
-    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged
+    global _pest_cd_switch_done, _pest_cd_last_seen, _pest_cd_block_logged, _pest_cd_countdown_end, _pest_cd_ignore_ready_before
     while True:
         try:
             farm_on = farm_state == "on"
@@ -586,9 +597,24 @@ def pet_cd_monitor():
                 time.sleep(min(0.5, settle_wait))
                 continue
 
-            raw_cd = g2.get_tablist_cached().get("pest_cooldown")
-            ready_now = _is_cd_ready_text(raw_cd)
-            cd = 0 if ready_now else _get_pest_cd_remaining()
+            tab_cache = g2.get_tablist_cached()
+            raw_cd = tab_cache.get("pest_cooldown")
+            tab_updated_at = tab_cache.get("_updated_at") or 0.0
+            tab_age = get_tablist_cache_age()
+            raw_ready = _is_cd_ready_text(raw_cd)
+            stale_ready_after_reset = bool(raw_ready and tab_updated_at < _pest_cd_ignore_ready_before)
+            ready_now = raw_ready and not stale_ready_after_reset
+            local_cd = _get_pest_cd_remaining()
+            if ready_now and local_cd > 0:
+                log(
+                    "pest cooldown 收到伺服器 READY，立即結束本地倒計時: "
+                    f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, tab_updated_at={tab_updated_at}, "
+                    f"previous_local_remaining={local_cd}"
+                )
+                _pest_cd_countdown_end = time.time()
+                local_cd = 0
+            predicted_ready = local_cd <= 0
+            cd = 0 if (ready_now or predicted_ready) else local_cd
 
             if not (farm_on and pest_idle and patrol_ok and action_idle):
                 _pest_cd_last_seen = None
@@ -599,16 +625,24 @@ def pet_cd_monitor():
             if _pest_cd_last_seen != cd:
                 log(
                     "pest cooldown 本地倒計時詳情: "
-                    f"server_raw={raw_cd!r}, server_ready_exact={ready_now}, local_remaining={cd}, "
-                    f"current_pet={current_pet!r}, equipment={_current_equipment_set!r}, "
+                    f"server_raw={raw_cd!r}, server_ready_text={raw_ready}, server_ready_effective={ready_now}, "
+                    f"stale_ready_after_reset={stale_ready_after_reset}, tab_age={tab_age:.2f}, tab_updated_at={tab_updated_at}, "
+                    f"ignore_ready_before={_pest_cd_ignore_ready_before}, local_remaining={local_cd}, "
+                    f"predicted_ready={predicted_ready}, display_cd={cd}, current_pet={current_pet!r}, equipment={_current_equipment_set!r}, "
                     f"switch_done={_pest_cd_switch_done}, farm_on={farm_on}, pest_idle={pest_idle}, "
                     f"patrol_ok={patrol_ok}, action_idle={action_idle}"
                 )
                 _pest_cd_last_seen = cd
 
-            should_switch = ready_now or cd <= 0
+            should_switch = ready_now or predicted_ready
+            if predicted_ready and not ready_now and not _pest_cd_switch_done:
+                log(
+                    "pest cooldown 本地倒計時預測 READY，允許切蚊子: "
+                    f"server_raw={raw_cd!r}, tab_age={tab_age:.2f}, stale_ready_after_reset={stale_ready_after_reset}, "
+                    f"current_pet={current_pet!r}, equipment={_current_equipment_set!r}"
+                )
             if should_switch and not _pest_cd_switch_done:
-                trigger = "READY" if ready_now else "本地倒計時歸零"
+                trigger = "伺服器READY" if ready_now else "本地倒計時預測READY"
                 if "Mosquito" not in current_pet:
                     minescript.echo(f"§e[寵物] pest cooldown {trigger}，切換蚊子+Pesthunters")
                     log(f"寵物切換：{trigger}，切換蚊子+Pesthunters")
@@ -1090,13 +1124,8 @@ def chat_listener_loop():
                     continue
                 minescript.echo(f"§a[ChatPest] Plot {plot_num} 有蟲！準備除蟲")
                 log(f"ChatPest：Plot {plot_num}")
-                # 蟲生成 → 一律走共用切寵/換裝確認流程，避免快取寵物資訊誤判而漏切。
-                _switch_pet_and_equip(
-                    "dragon",
-                    "蟲出現切玫瑰龍",
-                    respect_pet_switch_cooldown=False,
-                )
-                threading.Thread(target=chat_pest_run, args=(plot_num,), daemon=True).start()
+                # 交給可編輯的事件工作流；預設只排程 chat_pest_run，延遲結束後才暫停農業並切寵。
+                _run_workflow_event("Chat害蟲生成事件", {"plot_num": plot_num})
             except Exception as e:
                 minescript.echo(f"§c[ChatPest] 處理訊息出錯: {e}")
 
@@ -1321,6 +1350,289 @@ def toggle_chat_pest():
 
 chat_btn = rnd_btn(cf, "🐛 OFF", toggle_chat_pest, C["bg3"], C["dim"], width=5, height=2)
 chat_btn.pack(side="left", padx=(4, 0))
+
+# ────────────────────────────────────────────────
+#  Scratch-like 工作流積木 UI
+# ────────────────────────────────────────────────
+_workflows = wfblocks.load_workflows()
+_workflow_names = list(_workflows.keys())
+_selected_workflow = tk.StringVar(value=_workflow_names[0] if _workflow_names else "農業啟動前置")
+_workflow_editor = None
+_workflow_canvas = None
+_drag_block_index = None
+_drag_current_y = None
+
+_WORKFLOW_COLORS = {
+    "觸發": ("#ec4899", "#500724"),
+    "條件": ("#eab308", "#422006"),
+    "農業": ("#22c55e", "#052e16"),
+    "換裝+寵物": ("#38bdf8", "#082f49"),
+    "清理": ("#f59e0b", "#451a03"),
+    "除蟲": ("#f97316", "#431407"),
+    "時間": ("#a78bfa", "#2e1065"),
+}
+
+
+def _block_spec(action: str):
+    for spec in wfblocks.DEFAULT_BLOCKS:
+        if spec.key == action:
+            return spec
+    return None
+
+
+def _block_colors(action: str):
+    spec = _block_spec(action)
+    if spec:
+        return _WORKFLOW_COLORS.get(spec.category, (C["bg3"], C["fg"]))
+    return C["bg3"], C["fg"]
+
+
+def _workflow_actions():
+    return {
+        "stop_farm_keys": lambda: stop_farm_keys(),
+        "start_farm_keys": lambda: start_farm_keys(),
+        "farm_entry_actions": lambda: perform_farm_entry_actions(),
+        "switch_dragon": lambda: _switch_pet_and_equip("dragon", "工作流切玫瑰龍", resume_farm=False, respect_pet_switch_cooldown=False),
+        "switch_mosquito": lambda: _switch_pet_and_equip("mosquito", "工作流切蚊子", resume_farm=False, respect_pet_switch_cooldown=False),
+        "sell_vinyl": lambda: example.sell_vinyl() if example is not None else log("工作流：example.py 未載入，無法賣唱片"),
+        "pest_all": lambda: pest_run(),
+        "chat_pest_start": lambda context=None: threading.Thread(
+            target=chat_pest_run,
+            args=(int((context or {}).get("plot_num") or 0),),
+            daemon=True,
+        ).start() if (context or {}).get("plot_num") else log("工作流：chat_pest_start 缺少 plot_num context"),
+        "if_farm_on": lambda: farm_state == "on",
+        "if_chat_pest_enabled": lambda: _chat_pest_enabled,
+        "if_pest_idle": lambda: not _pest_busy,
+        "if_pet_not_mosquito": lambda: not pet_name_matches(get_current_pet(), "Mosquito"),
+        "wait_1": lambda: time.sleep(1),
+        "wait_5": lambda: time.sleep(5),
+    }
+
+
+def _refresh_workflow_bar(*_):
+    workflow_cb["values"] = list(_workflows.keys())
+    name = _selected_workflow.get()
+    if name not in _workflows and _workflows:
+        _selected_workflow.set(next(iter(_workflows)))
+    count = len(_workflows.get(_selected_workflow.get(), []))
+    workflow_count_var.set(f"{count} blocks")
+    _redraw_workflow_canvas()
+
+
+def _workflow_save():
+    wfblocks.save_workflows(_workflows)
+    log(f"工作流已儲存：{wfblocks.WORKFLOW_FILE}")
+
+
+def _workflow_run_selected():
+    name = _selected_workflow.get()
+    blocks = list(_workflows.get(name, []))
+    threading.Thread(
+        target=lambda: wfblocks.run_workflow(name, blocks, _workflow_actions(), log),
+        daemon=True,
+    ).start()
+
+
+def _run_workflow_event(name: str, context: dict):
+    blocks = list(_workflows.get(name, []))
+    if not blocks:
+        log(f"工作流事件不存在：{name}，使用原始 ChatPest")
+        plot_num = context.get("plot_num")
+        if plot_num:
+            threading.Thread(target=chat_pest_run, args=(plot_num,), daemon=True).start()
+        return
+    threading.Thread(
+        target=lambda: wfblocks.run_workflow(name, blocks, _workflow_actions(), log, context=context),
+        daemon=True,
+    ).start()
+
+
+def _workflow_new():
+    base = "自訂工作流"
+    name = base
+    n = 1
+    while name in _workflows:
+        n += 1
+        name = f"{base}{n}"
+    _workflows[name] = []
+    _selected_workflow.set(name)
+    _refresh_workflow_bar()
+    log(f"工作流新增：{name}")
+
+
+def _workflow_add_action(action: str):
+    name = _selected_workflow.get().strip() or "自訂工作流"
+    _workflows.setdefault(name, [])
+    spec = wfblocks.find_spec(action)
+    if spec and spec.kind == "condition":
+        block = {"if": action, "then": []}
+    elif spec and spec.kind == "trigger":
+        block = {"trigger": action}
+    else:
+        block = {"action": action}
+    _workflows[name].append(block)
+    _selected_workflow.set(name)
+    _refresh_workflow_bar()
+    log(f"工作流新增積木：{name} → {action}")
+
+
+def _workflow_delete_index(idx: int):
+    name = _selected_workflow.get()
+    blocks = _workflows.get(name, [])
+    if 0 <= idx < len(blocks):
+        removed = blocks.pop(idx)
+        log(f"工作流移除積木：{name} → {removed.get('action')}")
+    _refresh_workflow_bar()
+
+
+def _workflow_move_index(idx: int, new_idx: int):
+    name = _selected_workflow.get()
+    blocks = _workflows.get(name, [])
+    if 0 <= idx < len(blocks) and 0 <= new_idx < len(blocks) and idx != new_idx:
+        block = blocks.pop(idx)
+        blocks.insert(new_idx, block)
+        log(f"工作流拖曳排序：{name} #{idx + 1} → #{new_idx + 1}")
+    _refresh_workflow_bar()
+
+
+def _workflow_canvas_index(y: int, allow_end: bool = False) -> int:
+    count = len(_workflows.get(_selected_workflow.get(), []))
+    if count <= 0:
+        return 0
+    upper = count if allow_end else count - 1
+    return max(0, min(upper, int((y - 16) // 46)))
+
+
+def _on_workflow_press(ev):
+    global _drag_block_index, _drag_current_y
+    blocks = _workflows.get(_selected_workflow.get(), [])
+    if not blocks:
+        _drag_block_index = None
+        _drag_current_y = None
+        return
+    _drag_block_index = _workflow_canvas_index(ev.y)
+    _drag_current_y = ev.y
+    _redraw_workflow_canvas()
+
+
+def _on_workflow_motion(ev):
+    global _drag_current_y
+    if _drag_block_index is None:
+        return
+    _drag_current_y = ev.y
+    _redraw_workflow_canvas()
+
+
+def _on_workflow_release(ev):
+    global _drag_block_index, _drag_current_y
+    if _drag_block_index is None:
+        return
+    _workflow_move_index(_drag_block_index, _workflow_canvas_index(ev.y, allow_end=True))
+    _drag_block_index = None
+    _drag_current_y = None
+    _redraw_workflow_canvas()
+
+def _on_workflow_right_click(ev):
+    blocks = _workflows.get(_selected_workflow.get(), [])
+    if blocks:
+        _workflow_delete_index(_workflow_canvas_index(ev.y))
+
+
+def _draw_workflow_block(idx: int, block: dict, y: int, ghost: bool = False):
+    action = wfblocks.block_key(block)
+    spec = _block_spec(action)
+    label = spec.label if spec else action
+    cat = spec.category if spec else "?"
+    bg, fg = _block_colors(action)
+    outline = "#f8fafc" if ghost else C["acc"]
+    shadow = "#020617"
+    if ghost:
+        _workflow_canvas.create_rectangle(20, y + 5, 446, y + 43, fill=shadow, outline="", stipple="gray50")
+    _workflow_canvas.create_rectangle(12, y, 438, y + 38, fill=bg, outline=outline, width=3 if ghost else 2)
+    _workflow_canvas.create_oval(4, y + 10, 22, y + 28, fill=bg, outline=outline, width=2)
+    _workflow_canvas.create_oval(428, y + 10, 446, y + 28, fill="#0f172a", outline=outline, width=2)
+    child_count = len(block.get("then", [])) if block.get("if") else 0
+    suffix = f"  then {child_count}" if child_count else ""
+    _workflow_canvas.create_text(30, y + 19, text=f"{idx + 1}. {cat}｜{label}{suffix}", anchor="w", fill=fg, font=FL)
+
+
+def _redraw_workflow_canvas():
+    if _workflow_canvas is None:
+        return
+    _workflow_canvas.delete("all")
+    blocks = _workflows.get(_selected_workflow.get(), [])
+    if not blocks:
+        _workflow_canvas.create_text(18, 24, text="從左側 Palette 點擊積木加入工作流", anchor="w", fill=C["dim"], font=FM)
+        return
+    insert_idx = _workflow_canvas_index(_drag_current_y or 0, allow_end=True) if _drag_block_index is not None else None
+    for idx, block in enumerate(blocks):
+        if idx == _drag_block_index:
+            continue
+        y = 16 + idx * 48
+        _draw_workflow_block(idx, block, y)
+    if insert_idx is not None:
+        y_line = 12 + insert_idx * 48
+        _workflow_canvas.create_rectangle(10, y_line, 450, y_line + 4, fill="#f8fafc", outline="")
+    if _drag_block_index is not None and 0 <= _drag_block_index < len(blocks):
+        drag_y = max(10, (_drag_current_y or 40) - 19)
+        _draw_workflow_block(_drag_block_index, blocks[_drag_block_index], drag_y, ghost=True)
+    _workflow_canvas.configure(scrollregion=(0, 0, 470, max(240, 28 + len(blocks) * 48)))
+
+
+def _open_workflow_editor():
+    global _workflow_editor, _workflow_canvas
+    if _workflow_editor and _workflow_editor.winfo_exists():
+        _workflow_editor.lift()
+        return
+    _workflow_editor = tk.Toplevel(tk_root)
+    _workflow_editor.title("🧩 Workflow Blocks")
+    _workflow_editor.geometry("820x460")
+    _workflow_editor.configure(bg=C["bg"])
+    _workflow_editor.attributes("-topmost", True)
+
+    left = tk.Frame(_workflow_editor, bg=C["bg2"], padx=8, pady=8)
+    left.pack(side="left", fill="y")
+    tk.Label(left, text="Palette\n點擊加入", bg=C["bg2"], fg=C["acc"], font=FL, justify="left").pack(anchor="w", pady=(0, 6))
+    for spec in wfblocks.DEFAULT_BLOCKS:
+        bg, fg = _block_colors(spec.key)
+        btn = tk.Button(left, text=f"{spec.category}\n{spec.label}", command=lambda a=spec.key: _workflow_add_action(a),
+                        bg=bg, fg=fg, activebackground=C["acc"], activeforeground="#1a2e1a",
+                        relief="flat", width=18, height=2, font=FM, cursor="hand2")
+        btn.pack(fill="x", pady=2)
+
+    right = tk.Frame(_workflow_editor, bg=C["bg"], padx=8, pady=8)
+    right.pack(side="left", fill="both", expand=True)
+    tk.Label(right, text="拖曳右側積木即可排序；右鍵刪除", bg=C["bg"], fg=C["fg"], font=FL).pack(anchor="w")
+    _workflow_canvas = tk.Canvas(right, bg="#020617", highlightthickness=2, highlightbackground=C["acc"])
+    _workflow_canvas.pack(fill="both", expand=True, pady=6)
+    _workflow_canvas.bind("<ButtonPress-1>", _on_workflow_press)
+    _workflow_canvas.bind("<B1-Motion>", _on_workflow_motion)
+    _workflow_canvas.bind("<ButtonRelease-1>", _on_workflow_release)
+    _workflow_canvas.bind("<Button-3>", _on_workflow_right_click)
+
+    bottom = tk.Frame(right, bg=C["bg"])
+    bottom.pack(fill="x")
+    tk.Button(bottom, text="New", command=_workflow_new, bg=C["bg3"], fg=C["fg"], relief="flat", font=FB).pack(side="left", padx=2)
+    tk.Button(bottom, text="Save", command=_workflow_save, bg=C["yel"], fg="#332700", relief="flat", font=FB).pack(side="left", padx=2)
+    tk.Button(bottom, text="Run", command=_workflow_run_selected, bg=C["grn"], fg="#06220c", relief="flat", font=FB).pack(side="left", padx=2)
+    _redraw_workflow_canvas()
+
+
+# 主視窗只保留不擠版的精簡工作流列；真正可視化拖曳在 Editor 視窗。
+for _child in workflow_frame.winfo_children():
+    _child.destroy()
+workflow_frame.configure(bg=C["bg2"])
+tk.Label(workflow_frame, text="🧩 工作流", bg=C["bg2"], fg=C["acc"], font=FL).pack(side="left", padx=(0, 6))
+workflow_cb = ttk.Combobox(workflow_frame, width=16, state="readonly", textvariable=_selected_workflow, font=FM)
+workflow_cb.pack(side="left", padx=2)
+workflow_count_var = tk.StringVar(value="0 blocks")
+tk.Label(workflow_frame, textvariable=workflow_count_var, bg=C["bg2"], fg=C["fg"], font=FM).pack(side="left", padx=6)
+rnd_btn(workflow_frame, "Editor", _open_workflow_editor, C["bg3"], C["acc"], width=7, height=1).pack(side="left", padx=2)
+rnd_btn(workflow_frame, "Run", _workflow_run_selected, C["grn"], "#1a2e1a", width=5, height=1).pack(side="left", padx=2)
+rnd_btn(workflow_frame, "Save", _workflow_save, C["yel"], "#332700", width=5, height=1).pack(side="left", padx=2)
+workflow_cb.bind("<<ComboboxSelected>>", _refresh_workflow_bar)
+_refresh_workflow_bar()
 
 
 def initial_pest_scan_once():
