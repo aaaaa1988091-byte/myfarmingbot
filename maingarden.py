@@ -1362,6 +1362,8 @@ _workflow_canvas = None
 _drag_block_index = None
 _drag_current_y = None
 _workflow_top_y_ranges = []
+_workflow_hit_ranges = []
+_workflow_selected_path = None
 
 _WORKFLOW_COLORS = {
     "觸發": ("#ec4899", "#500724"),
@@ -1513,10 +1515,13 @@ def _workflow_count_blocks(blocks: list[dict]) -> int:
     return total
 
 def _refresh_workflow_bar(*_):
+    global _workflow_selected_path
     workflow_cb["values"] = list(_workflows.keys())
     name = _selected_workflow.get()
     if name not in _workflows and _workflows:
         _selected_workflow.set(next(iter(_workflows)))
+    if _workflow_selected_path and _workflow_get_block(_workflow_selected_path) is None:
+        _workflow_selected_path = None
     blocks = _workflows.get(_selected_workflow.get(), [])
     count = _workflow_count_blocks(blocks)
     workflow_count_var.set(f"{count} blocks")
@@ -1551,7 +1556,63 @@ def _run_workflow_event(name: str, context: dict):
     ).start()
 
 
+
+def _workflow_get_block(path):
+    blocks = _workflows.get(_selected_workflow.get(), [])
+    block = None
+    for depth, idx in enumerate(path or []):
+        if not isinstance(idx, int) or idx < 0 or idx >= len(blocks):
+            return None
+        block = blocks[idx]
+        blocks = block.get("then", []) if depth < len(path) - 1 else []
+    return block
+
+
+def _workflow_parent_list(path):
+    if not path:
+        return None
+    if len(path) == 1:
+        return _workflows.get(_selected_workflow.get(), [])
+    parent = _workflow_get_block(path[:-1])
+    if not parent:
+        return None
+    return parent.setdefault("then", [])
+
+
+def _workflow_add_to_selected(block: dict) -> str:
+    selected = _workflow_get_block(_workflow_selected_path)
+    if selected and selected.get("if"):
+        selected.setdefault("then", []).append(block)
+        return f"條件積木 {_workflow_selected_path} 的 then 裡"
+    if _workflow_selected_path:
+        siblings = _workflow_parent_list(_workflow_selected_path)
+        if siblings is not None:
+            siblings.insert(_workflow_selected_path[-1] + 1, block)
+            return f"選取積木 {_workflow_selected_path} 後方"
+    name = _selected_workflow.get().strip() or "自訂工作流"
+    _workflows.setdefault(name, []).append(block)
+    return "最外層"
+
+
+def _workflow_delete_path(path) -> bool:
+    siblings = _workflow_parent_list(path)
+    if siblings is None:
+        return False
+    idx = path[-1]
+    if 0 <= idx < len(siblings):
+        siblings.pop(idx)
+        return True
+    return False
+
+
+def _workflow_path_at_y(y: int):
+    for path, top, bottom in reversed(_workflow_hit_ranges):
+        if top <= y <= bottom:
+            return path
+    return None
+
 def _workflow_new():
+    global _workflow_selected_path
     base = "自訂工作流"
     name = base
     n = 1
@@ -1560,11 +1621,13 @@ def _workflow_new():
         name = f"{base}{n}"
     _workflows[name] = []
     _selected_workflow.set(name)
+    _workflow_selected_path = None
     _refresh_workflow_bar()
     log(f"工作流新增：{name}")
 
 
 def _workflow_add_action(action: str):
+    global _workflow_selected_path
     name = _selected_workflow.get().strip() or "自訂工作流"
     _workflows.setdefault(name, [])
     spec = wfblocks.find_spec(action)
@@ -1574,17 +1637,19 @@ def _workflow_add_action(action: str):
         block = {"trigger": action}
     else:
         block = {"action": action}
-    _workflows[name].append(block)
+    destination = _workflow_add_to_selected(block)
     _selected_workflow.set(name)
     _refresh_workflow_bar()
-    log(f"工作流新增積木：{name} → {action}")
+    log(f"工作流新增積木：{name} → {action}（{destination}）")
 
 
 def _workflow_delete_index(idx: int):
+    global _workflow_selected_path
     name = _selected_workflow.get()
     blocks = _workflows.get(name, [])
     if 0 <= idx < len(blocks):
         removed = blocks.pop(idx)
+        _workflow_selected_path = None
         log(f"工作流移除積木：{name} → {removed.get('action')}")
     _refresh_workflow_bar()
 
@@ -1614,14 +1679,20 @@ def _workflow_canvas_index(y: int, allow_end: bool = False) -> int:
 
 
 def _on_workflow_press(ev):
-    global _drag_block_index, _drag_current_y
+    global _drag_block_index, _drag_current_y, _workflow_selected_path
     blocks = _workflows.get(_selected_workflow.get(), [])
     if not blocks:
         _drag_block_index = None
         _drag_current_y = None
+        _workflow_selected_path = None
         return
-    _drag_block_index = _workflow_canvas_index(ev.y)
-    _drag_current_y = ev.y
+    _workflow_selected_path = _workflow_path_at_y(ev.y)
+    if _workflow_selected_path and len(_workflow_selected_path) == 1:
+        _drag_block_index = _workflow_selected_path[0]
+        _drag_current_y = ev.y
+    else:
+        _drag_block_index = None
+        _drag_current_y = None
     _redraw_workflow_canvas()
 
 
@@ -1644,9 +1715,12 @@ def _on_workflow_release(ev):
 
 
 def _on_workflow_right_click(ev):
-    blocks = _workflows.get(_selected_workflow.get(), [])
-    if blocks:
-        _workflow_delete_index(_workflow_canvas_index(ev.y))
+    global _workflow_selected_path
+    path = _workflow_path_at_y(ev.y)
+    if path and _workflow_delete_path(path):
+        _workflow_selected_path = None
+        _refresh_workflow_bar()
+        log(f"工作流移除積木：{_selected_workflow.get()} → {path}")
 
 
 def _workflow_block_height(block: dict) -> int:
@@ -1664,35 +1738,37 @@ def _draw_scratch_notch(x: int, y: int, fill: str, outline: str):
     _workflow_canvas.create_rectangle(x + 42, y + 36, x + 92, y + 43, fill=fill, outline=outline)
 
 
-def _draw_workflow_block(index_text: str, block: dict, x: int, y: int, width: int, ghost: bool = False) -> int:
+def _draw_workflow_block(index_text: str, block: dict, x: int, y: int, width: int, path: tuple[int, ...], ghost: bool = False) -> int:
     action = wfblocks.block_key(block)
     spec = _block_spec(action)
     label = spec.label if spec else action
     cat = spec.category if spec else "?"
     bg, fg = _block_colors(action)
-    outline = "#f8fafc" if ghost else C["acc"]
+    selected = path == _workflow_selected_path
+    outline = "#f8fafc" if (ghost or selected) else C["acc"]
     shadow = "#020617"
     block_h = _workflow_block_height(block)
     header_h = 42
     if ghost:
         _workflow_canvas.create_rectangle(x + 8, y + 5, x + width + 8, y + block_h + 5, fill=shadow, outline="", stipple="gray50")
+    _workflow_hit_ranges.append((path, y, y + block_h))
 
     if block.get("if"):
-        _workflow_canvas.create_rectangle(x, y, x + width, y + block_h, fill=bg, outline=outline, width=3 if ghost else 2)
+        _workflow_canvas.create_rectangle(x, y, x + width, y + block_h, fill=bg, outline=outline, width=3 if (ghost or selected) else 2)
         _workflow_canvas.create_rectangle(x + 24, y + header_h, x + width - 12, y + block_h - 14, fill="#020617", outline=outline, width=1)
         _workflow_canvas.create_text(x + 18, y + 21, text=f"{index_text} 如果｜{label}", anchor="w", fill=fg, font=FL)
         _workflow_canvas.create_text(x + 34, y + header_h + 14, text="then", anchor="w", fill="#fef3c7", font=FM)
         child_y = y + header_h + 28
         for child_idx, child in enumerate(block.get("then", []), 1):
-            child_y = _draw_workflow_block(f"{index_text}.{child_idx}", child, x + 34, child_y, width - 46, ghost)
+            child_y = _draw_workflow_block(f"{index_text}.{child_idx}", child, x + 34, child_y, width - 46, path + (child_idx - 1,), ghost)
         if block.get("else"):
             _workflow_canvas.create_text(x + 34, child_y + 10, text="else", anchor="w", fill="#fef3c7", font=FM)
             child_y += 24
             for child_idx, child in enumerate(block.get("else", []), 1):
-                child_y = _draw_workflow_block(f"{index_text}e{child_idx}", child, x + 34, child_y, width - 46, ghost)
+                child_y = _draw_workflow_block(f"{index_text}e{child_idx}", child, x + 34, child_y, width - 46, path + (child_idx - 1,), ghost)
         return y + block_h
 
-    _workflow_canvas.create_rectangle(x, y, x + width, y + 38, fill=bg, outline=outline, width=3 if ghost else 2)
+    _workflow_canvas.create_rectangle(x, y, x + width, y + 38, fill=bg, outline=outline, width=3 if (ghost or selected) else 2)
     _draw_scratch_notch(x, y, bg, outline)
     _workflow_canvas.create_oval(x - 8, y + 10, x + 10, y + 28, fill=bg, outline=outline, width=2)
     _workflow_canvas.create_oval(x + width - 10, y + 10, x + width + 8, y + 28, fill="#0f172a", outline=outline, width=2)
@@ -1702,11 +1778,12 @@ def _draw_workflow_block(index_text: str, block: dict, x: int, y: int, width: in
 
 
 def _redraw_workflow_canvas():
-    global _workflow_top_y_ranges
+    global _workflow_top_y_ranges, _workflow_hit_ranges
     if _workflow_canvas is None:
         return
     _workflow_canvas.delete("all")
     _workflow_top_y_ranges = []
+    _workflow_hit_ranges = []
     blocks = _workflows.get(_selected_workflow.get(), [])
     if not blocks:
         _workflow_canvas.create_text(18, 24, text="從左側 Palette 點擊積木加入工作流", anchor="w", fill=C["dim"], font=FM)
@@ -1718,7 +1795,7 @@ def _redraw_workflow_canvas():
         if idx == _drag_block_index:
             y += _workflow_block_height(block)
         else:
-            y = _draw_workflow_block(str(idx + 1), block, 16, y, 610)
+            y = _draw_workflow_block(str(idx + 1), block, 16, y, 610, (idx,))
         _workflow_top_y_ranges.append((idx, top_y, y))
     if insert_idx is not None:
         if insert_idx >= len(_workflow_top_y_ranges):
@@ -1728,7 +1805,7 @@ def _redraw_workflow_canvas():
         _workflow_canvas.create_rectangle(10, y_line, 650, y_line + 4, fill="#f8fafc", outline="")
     if _drag_block_index is not None and 0 <= _drag_block_index < len(blocks):
         drag_y = max(10, (_drag_current_y or 40) - 19)
-        _draw_workflow_block(str(_drag_block_index + 1), blocks[_drag_block_index], 16, drag_y, 610, ghost=True)
+        _draw_workflow_block(str(_drag_block_index + 1), blocks[_drag_block_index], 16, drag_y, 610, (_drag_block_index,), ghost=True)
     _workflow_canvas.configure(scrollregion=(0, 0, 660, max(240, y + 24)))
 
 
@@ -1755,7 +1832,7 @@ def _open_workflow_editor():
 
     right = tk.Frame(_workflow_editor, bg=C["bg"], padx=8, pady=8)
     right.pack(side="left", fill="both", expand=True)
-    tk.Label(right, text="像 Scratch 一樣由上往下讀：條件積木會把 then 內容包起來；拖曳最外層積木排序，右鍵刪除", bg=C["bg"], fg=C["fg"], font=FL).pack(anchor="w")
+    tk.Label(right, text="像 Scratch 一樣由上往下讀：點選 if 後再點 Palette 會加到 then 裡；拖曳最外層排序，右鍵可刪除任一積木", bg=C["bg"], fg=C["fg"], font=FL).pack(anchor="w")
     _workflow_canvas = tk.Canvas(right, bg="#020617", highlightthickness=2, highlightbackground=C["acc"])
     _workflow_canvas.pack(fill="both", expand=True, pady=6)
     _workflow_canvas.bind("<ButtonPress-1>", _on_workflow_press)
