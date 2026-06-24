@@ -26,38 +26,46 @@ DEFAULT_BLOCKS = [
     BlockSpec("if_farm_on", "如果農業中", "條件", "condition", "farm_state == on"),
     BlockSpec("if_chat_pest_enabled", "如果 ChatPest 開啟", "條件", "condition", "ChatPest 開關為 ON"),
     BlockSpec("if_pest_idle", "如果沒有除蟲中", "條件", "condition", "目前沒有 pest 任務"),
+    BlockSpec("if_has_pest_plot", "如果偵測到 Plot", "條件", "condition", "觸發 context 有 plot_num"),
     BlockSpec("if_pet_not_mosquito", "如果不是蚊子", "條件", "condition", "目前寵物不是 Mosquito"),
     BlockSpec("stop_farm_keys", "停止農業按鍵", "農業", "action", "放開攻擊/移動等農業按鍵"),
     BlockSpec("start_farm_keys", "開始農業按鍵", "農業", "action", "選鋤頭並按住農業按鍵"),
     BlockSpec("farm_entry_actions", "農業入場動作", "農業", "action", "蹲下、切欄位並執行原本入場點擊"),
+    BlockSpec("farm_begin", "農業開始", "農業", "action", "切玫瑰龍、入場並開始農業按鍵"),
+    BlockSpec("farm_continue", "繼續農業", "農業", "action", "除蟲後回花園並恢復農業"),
     BlockSpec("switch_dragon", "切玫瑰龍+Blossom", "換裝+寵物", "action", "切換寵物並穿 Blossom"),
     BlockSpec("switch_mosquito", "切蚊子+Pesthunters", "換裝+寵物", "action", "切換寵物並穿 Pesthunters"),
     BlockSpec("sell_vinyl", "賣唱片", "清理", "action", "呼叫 example.sell_vinyl"),
     BlockSpec("pest_all", "執行 /pest 除蟲", "除蟲", "action", "執行原本完整 /pest 流程"),
-    BlockSpec("chat_pest_start", "開始 ChatPest 除蟲", "除蟲", "action", "使用觸發 context 的 plot_num 開始除蟲"),
+    BlockSpec("chat_pest_prepare", "偵測除蟲後暫停農業", "除蟲", "action", "記住農業狀態、停農業並準備除蟲"),
+    BlockSpec("chat_pest_start", "除蟲開始", "除蟲", "action", "使用觸發 context 的 plot_num 前往除蟲並等待完成"),
     BlockSpec("wait_1", "等待 1 秒", "時間", "action", "暫停 1 秒"),
     BlockSpec("wait_5", "等待 5 秒", "時間", "action", "暫停 5 秒"),
 ]
 
 DEFAULT_WORKFLOWS = {
-    "主工作流": [
-        {"if": "if_farm_on", "then": [
-            {"action": "switch_dragon"},
-            {"action": "farm_entry_actions"},
-            {"action": "start_farm_keys"},
-        ]},
-        {"trigger": "trigger_pest_ready"},
-        {"if": "if_pet_not_mosquito", "then": [
-            {"action": "stop_farm_keys"},
-            {"action": "switch_mosquito"},
-            {"action": "sell_vinyl"},
+    "農業→除蟲→繼續": [
+        {"action": "farm_begin"},
+        {"trigger": "trigger_chat_pest"},
+        {"if": "if_chat_pest_enabled", "then": [
+            {"if": "if_has_pest_plot", "then": [
+                {"if": "if_pest_idle", "then": [
+                    {"action": "chat_pest_prepare"},
+                    {"action": "chat_pest_start"},
+                    {"action": "farm_continue"},
+                ]},
+            ]},
         ]},
     ],
     "Chat害蟲生成事件": [
         {"trigger": "trigger_chat_pest"},
         {"if": "if_chat_pest_enabled", "then": [
-            {"if": "if_pest_idle", "then": [
-                {"action": "chat_pest_start"},
+            {"if": "if_has_pest_plot", "then": [
+                {"if": "if_pest_idle", "then": [
+                    {"action": "chat_pest_prepare"},
+                    {"action": "chat_pest_start"},
+                    {"action": "farm_continue"},
+                ]},
             ]},
         ]},
     ],

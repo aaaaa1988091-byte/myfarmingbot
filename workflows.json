@@ -1,32 +1,60 @@
 {
-  "主工作流": [
+  "農業→除蟲→繼續": [
     {
-      "if": "if_farm_on",
-      "then": [
-        {"action": "switch_dragon"},
-        {"action": "farm_entry_actions"},
-        {"action": "start_farm_keys"}
-      ]
+      "action": "farm_begin"
     },
-    {"trigger": "trigger_pest_ready"},
     {
-      "if": "if_pet_not_mosquito",
-      "then": [
-        {"action": "stop_farm_keys"},
-        {"action": "switch_mosquito"},
-        {"action": "sell_vinyl"}
-      ]
-    }
-  ],
-  "Chat害蟲生成事件": [
-    {"trigger": "trigger_chat_pest"},
+      "trigger": "trigger_chat_pest"
+    },
     {
       "if": "if_chat_pest_enabled",
       "then": [
         {
-          "if": "if_pest_idle",
+          "if": "if_has_pest_plot",
           "then": [
-            {"action": "chat_pest_start"}
+            {
+              "if": "if_pest_idle",
+              "then": [
+                {
+                  "action": "chat_pest_prepare"
+                },
+                {
+                  "action": "chat_pest_start"
+                },
+                {
+                  "action": "farm_continue"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "Chat害蟲生成事件": [
+    {
+      "trigger": "trigger_chat_pest"
+    },
+    {
+      "if": "if_chat_pest_enabled",
+      "then": [
+        {
+          "if": "if_has_pest_plot",
+          "then": [
+            {
+              "if": "if_pest_idle",
+              "then": [
+                {
+                  "action": "chat_pest_prepare"
+                },
+                {
+                  "action": "chat_pest_start"
+                },
+                {
+                  "action": "farm_continue"
+                }
+              ]
+            }
           ]
         }
       ]
