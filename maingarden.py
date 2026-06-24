@@ -1364,6 +1364,7 @@ _drag_current_y = None
 _workflow_top_y_ranges = []
 _workflow_hit_ranges = []
 _workflow_selected_path = None
+_workflow_insert_branch = tk.StringVar(value="then")
 
 _WORKFLOW_COLORS = {
     "觸發": ("#ec4899", "#500724"),
@@ -1560,11 +1561,20 @@ def _run_workflow_event(name: str, context: dict):
 def _workflow_get_block(path):
     blocks = _workflows.get(_selected_workflow.get(), [])
     block = None
-    for depth, idx in enumerate(path or []):
+    i = 0
+    while i < len(path or ()):
+        idx = path[i]
         if not isinstance(idx, int) or idx < 0 or idx >= len(blocks):
             return None
         block = blocks[idx]
-        blocks = block.get("then", []) if depth < len(path) - 1 else []
+        i += 1
+        if i >= len(path):
+            return block
+        branch = path[i]
+        if branch not in {"then", "else"}:
+            return None
+        blocks = block.get(branch, [])
+        i += 1
     return block
 
 
@@ -1573,17 +1583,21 @@ def _workflow_parent_list(path):
         return None
     if len(path) == 1:
         return _workflows.get(_selected_workflow.get(), [])
-    parent = _workflow_get_block(path[:-1])
-    if not parent:
+    if len(path) < 3:
         return None
-    return parent.setdefault("then", [])
+    branch = path[-2]
+    parent = _workflow_get_block(path[:-2])
+    if not parent or branch not in {"then", "else"}:
+        return None
+    return parent.setdefault(branch, [])
 
 
 def _workflow_add_to_selected(block: dict) -> str:
     selected = _workflow_get_block(_workflow_selected_path)
     if selected and selected.get("if"):
-        selected.setdefault("then", []).append(block)
-        return f"條件積木 {_workflow_selected_path} 的 then 裡"
+        branch = _workflow_insert_branch.get() if _workflow_insert_branch.get() in {"then", "else"} else "then"
+        selected.setdefault(branch, []).append(block)
+        return f"條件積木 {_workflow_selected_path} 的 {branch} 裡"
     if _workflow_selected_path:
         siblings = _workflow_parent_list(_workflow_selected_path)
         if siblings is not None:
@@ -1760,12 +1774,12 @@ def _draw_workflow_block(index_text: str, block: dict, x: int, y: int, width: in
         _workflow_canvas.create_text(x + 34, y + header_h + 14, text="then", anchor="w", fill="#fef3c7", font=FM)
         child_y = y + header_h + 28
         for child_idx, child in enumerate(block.get("then", []), 1):
-            child_y = _draw_workflow_block(f"{index_text}.{child_idx}", child, x + 34, child_y, width - 46, path + (child_idx - 1,), ghost)
+            child_y = _draw_workflow_block(f"{index_text}.{child_idx}", child, x + 34, child_y, width - 46, path + ("then", child_idx - 1), ghost)
         if block.get("else"):
             _workflow_canvas.create_text(x + 34, child_y + 10, text="else", anchor="w", fill="#fef3c7", font=FM)
             child_y += 24
             for child_idx, child in enumerate(block.get("else", []), 1):
-                child_y = _draw_workflow_block(f"{index_text}e{child_idx}", child, x + 34, child_y, width - 46, path + (child_idx - 1,), ghost)
+                child_y = _draw_workflow_block(f"{index_text}e{child_idx}", child, x + 34, child_y, width - 46, path + ("else", child_idx - 1), ghost)
         return y + block_h
 
     _workflow_canvas.create_rectangle(x, y, x + width, y + 38, fill=bg, outline=outline, width=3 if (ghost or selected) else 2)
@@ -1832,7 +1846,7 @@ def _open_workflow_editor():
 
     right = tk.Frame(_workflow_editor, bg=C["bg"], padx=8, pady=8)
     right.pack(side="left", fill="both", expand=True)
-    tk.Label(right, text="像 Scratch 一樣由上往下讀：點選 if 後再點 Palette 會加到 then 裡；拖曳最外層排序，右鍵可刪除任一積木", bg=C["bg"], fg=C["fg"], font=FL).pack(anchor="w")
+    tk.Label(right, text="像 Scratch 一樣由上往下讀：點選 if 後可選 then/else，再點 Palette 加進分支；拖曳最外層排序，右鍵可刪除任一積木", bg=C["bg"], fg=C["fg"], font=FL).pack(anchor="w")
     _workflow_canvas = tk.Canvas(right, bg="#020617", highlightthickness=2, highlightbackground=C["acc"])
     _workflow_canvas.pack(fill="both", expand=True, pady=6)
     _workflow_canvas.bind("<ButtonPress-1>", _on_workflow_press)
@@ -1842,6 +1856,13 @@ def _open_workflow_editor():
 
     bottom = tk.Frame(right, bg=C["bg"])
     bottom.pack(fill="x")
+    tk.Label(bottom, text="新增到:", bg=C["bg"], fg=C["dim"], font=FM).pack(side="left", padx=(0, 4))
+    tk.Radiobutton(bottom, text="then", variable=_workflow_insert_branch, value="then",
+                   bg=C["bg"], fg=C["fg"], selectcolor=C["bg3"], activebackground=C["bg"],
+                   activeforeground=C["acc"], font=FM).pack(side="left")
+    tk.Radiobutton(bottom, text="else", variable=_workflow_insert_branch, value="else",
+                   bg=C["bg"], fg=C["fg"], selectcolor=C["bg3"], activebackground=C["bg"],
+                   activeforeground=C["acc"], font=FM).pack(side="left", padx=(0, 8))
     tk.Button(bottom, text="New", command=_workflow_new, bg=C["bg3"], fg=C["fg"], relief="flat", font=FB).pack(side="left", padx=2)
     tk.Button(bottom, text="Save", command=_workflow_save, bg=C["yel"], fg="#332700", relief="flat", font=FB).pack(side="left", padx=2)
     tk.Button(bottom, text="Run", command=_workflow_run_selected, bg=C["grn"], fg="#06220c", relief="flat", font=FB).pack(side="left", padx=2)
