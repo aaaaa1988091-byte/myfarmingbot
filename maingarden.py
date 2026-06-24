@@ -191,6 +191,10 @@ tk.Frame(tk_root, bg=C["acc"], height=2).pack(fill="x")
 # ── 控制按鈕列（先預留，後面定義函數後再綁定）──
 cf = tk.Frame(tk_root, bg=C["bg"], pady=8); cf.pack(padx=10)
 
+# ── Scratch-like 工作流區（先放在日誌上方，後面定義函數後再填內容）──
+workflow_frame = tk.Frame(tk_root, bg=C["bg2"], pady=5, padx=8)
+workflow_frame.pack(fill="x", padx=8, pady=(0, 4))
+
 # ── 日誌框 ──────────────────────────────────────
 lf  = tk.Frame(tk_root, bg=C["bg"], pady=4, padx=8); lf.pack(fill="both", expand=True)
 sb  = tk.Scrollbar(lf, bg=C["bg3"], troughcolor=C["bg"], highlightthickness=0, width=8)
@@ -1356,8 +1360,8 @@ _workflow_names = list(_workflows.keys())
 _selected_workflow = tk.StringVar(value=_workflow_names[0] if _workflow_names else "農業啟動前置")
 _selected_block = tk.StringVar(value=wfblocks.DEFAULT_BLOCKS[0].key)
 
-workflow_frame = tk.Frame(tk_root, bg=C["bg2"], pady=5, padx=8)
-workflow_frame.pack(fill="x", padx=8, pady=(0, 4))
+for _child in workflow_frame.winfo_children():
+    _child.destroy()
 tk.Label(workflow_frame, text="🧩 工作流", bg=C["bg2"], fg=C["acc"], font=FL).grid(row=0, column=0, sticky="w")
 workflow_cb = ttk.Combobox(workflow_frame, width=14, state="readonly", textvariable=_selected_workflow, font=FM)
 workflow_cb.grid(row=0, column=1, padx=4, sticky="w")
