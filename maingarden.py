@@ -1387,23 +1387,115 @@ def _block_colors(action: str):
     return C["bg3"], C["fg"]
 
 
+
+def _workflow_farm_begin():
+    """Scratch 積木：農業開始。"""
+    global farm_state
+    _switch_pet_and_equip("dragon", "工作流：農業開始切玫瑰龍", resume_farm=False, respect_pet_switch_cooldown=False)
+    perform_farm_entry_actions()
+    farm_state = "on"
+    if not stats["start_time"]:
+        stats["start_time"] = time.time()
+    update_button(True)
+    start_farm_keys()
+    log("工作流：農業開始 → 已按住農業按鍵")
+
+
+def _workflow_chat_pest_prepare(context=None):
+    """Scratch 積木：偵測除蟲後暫停農業並取得主要動作鎖。"""
+    global farm_state, _pest_busy
+    context = context or {}
+    if context.get("wf_prepared"):
+        return
+    if _pest_busy:
+        log("工作流：已有除蟲任務，略過準備")
+        return
+    owned_major = _major_action_lock.acquire(blocking=False)
+    if not owned_major:
+        log("工作流：主要動作忙碌，略過除蟲準備")
+        return
+    context["wf_owned_major"] = True
+    context["wf_was_farming"] = (farm_state == "on")
+    _pest_busy = True
+    plot_num = context.get("plot_num")
+    log(f"工作流：偵測除蟲 Plot {plot_num} → 除蟲準備")
+    if context["wf_was_farming"]:
+        minescript.execute("/setspawn"); time.sleep(0.3)
+        farm_state = "off"; stop_farm_keys(); update_button(False)
+        if stats["start_time"]:
+            stats["total_seconds"] += int(time.time() - stats["start_time"])
+            stats["start_time"] = None
+        time.sleep(0.5)
+        _switch_pet_and_equip("dragon", "工作流：除蟲開始前切玫瑰龍", respect_pet_switch_cooldown=False)
+    context["wf_prepared"] = True
+
+
+def _workflow_chat_pest_start(context=None):
+    """Scratch 積木：除蟲開始，前往觸發的 plot 並等待 PatrolBot 完成。"""
+    context = context or {}
+    plot_num = int(context.get("plot_num") or 0)
+    if not plot_num:
+        log("工作流：除蟲開始缺少 plot_num context")
+        return
+    if not context.get("wf_prepared"):
+        _workflow_chat_pest_prepare(context)
+    if not context.get("wf_prepared"):
+        return
+    minescript.echo(f"§b[WorkflowPest] 前往 Plot {plot_num} 除蟲...")
+    log(f"工作流：除蟲開始 → Plot {plot_num}")
+    if not patrol_bot.start_single_plot(plot_num):
+        minescript.echo("§c[WorkflowPest] PatrolBot 忙碌")
+        log("工作流：PatrolBot 忙碌")
+        return
+    patrol_bot._done_event.wait(timeout=300)
+    context["wf_pest_done"] = True
+    log(f"工作流：除蟲完成 → Plot {plot_num}")
+
+
+def _workflow_farm_continue(context=None):
+    """Scratch 積木：除蟲後繼續農業並釋放工作流鎖。"""
+    global farm_state, _pest_busy
+    context = context or {}
+    try:
+        if context.get("wf_was_farming"):
+            minescript.echo("§e[WorkflowPest] /warp garden 回原位...")
+            minescript.execute("/warp garden")
+            wait_for_position(12); time.sleep(1.0)
+            minescript.player_press_sneak(True)
+            time.sleep(random.uniform(1.0, 1.5))
+            minescript.player_press_sneak(False); time.sleep(0.3)
+            farm_state = "on"; stats["start_time"] = time.time(); update_button(True)
+            start_farm_keys()
+            threading.Thread(target=farm_monitor, daemon=True).start()
+            minescript.echo("§a[WorkflowPest] 農業已恢復")
+            log("工作流：繼續農業")
+    finally:
+        _pest_busy = False
+        if context.get("wf_owned_major"):
+            try:
+                _major_action_lock.release()
+            except:
+                pass
+            context["wf_owned_major"] = False
+        tk_root.after(0, lambda: pest_btn.config(text="🪲 /pest", bg=C["yel"], fg="#1a2e1a"))
+
 def _workflow_actions():
     return {
         "stop_farm_keys": lambda: stop_farm_keys(),
         "start_farm_keys": lambda: start_farm_keys(),
         "farm_entry_actions": lambda: perform_farm_entry_actions(),
+        "farm_begin": lambda: _workflow_farm_begin(),
+        "farm_continue": lambda context=None: _workflow_farm_continue(context),
         "switch_dragon": lambda: _switch_pet_and_equip("dragon", "工作流切玫瑰龍", resume_farm=False, respect_pet_switch_cooldown=False),
         "switch_mosquito": lambda: _switch_pet_and_equip("mosquito", "工作流切蚊子", resume_farm=False, respect_pet_switch_cooldown=False),
         "sell_vinyl": lambda: example.sell_vinyl() if example is not None else log("工作流：example.py 未載入，無法賣唱片"),
         "pest_all": lambda: pest_run(),
-        "chat_pest_start": lambda context=None: threading.Thread(
-            target=chat_pest_run,
-            args=(int((context or {}).get("plot_num") or 0),),
-            daemon=True,
-        ).start() if (context or {}).get("plot_num") else log("工作流：chat_pest_start 缺少 plot_num context"),
+        "chat_pest_prepare": lambda context=None: _workflow_chat_pest_prepare(context),
+        "chat_pest_start": lambda context=None: _workflow_chat_pest_start(context),
         "if_farm_on": lambda: farm_state == "on",
         "if_chat_pest_enabled": lambda: _chat_pest_enabled,
         "if_pest_idle": lambda: not _pest_busy,
+        "if_has_pest_plot": lambda context=None: bool((context or {}).get("plot_num")),
         "if_pet_not_mosquito": lambda: not pet_name_matches(get_current_pet(), "Mosquito"),
         "wait_1": lambda: time.sleep(1),
         "wait_5": lambda: time.sleep(5),
