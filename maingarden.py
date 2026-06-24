@@ -1124,9 +1124,8 @@ def chat_listener_loop():
                     continue
                 minescript.echo(f"§a[ChatPest] Plot {plot_num} 有蟲！準備除蟲")
                 log(f"ChatPest：Plot {plot_num}")
-                # 只排程除蟲；不要在等待延遲期間開 UI 換裝，否則會 release_all/stop_farm_keys 讓農業卡住。
-                log(f"ChatPest：已排程 Plot {plot_num}，延遲結束後才暫停農業並切寵")
-                threading.Thread(target=chat_pest_run, args=(plot_num,), daemon=True).start()
+                # 交給可編輯的事件工作流；預設只排程 chat_pest_run，延遲結束後才暫停農業並切寵。
+                _run_workflow_event("Chat害蟲生成事件", {"plot_num": plot_num})
             except Exception as e:
                 minescript.echo(f"§c[ChatPest] 處理訊息出錯: {e}")
 
@@ -1358,13 +1357,14 @@ chat_btn.pack(side="left", padx=(4, 0))
 _workflows = wfblocks.load_workflows()
 _workflow_names = list(_workflows.keys())
 _selected_workflow = tk.StringVar(value=_workflow_names[0] if _workflow_names else "農業啟動前置")
-_selected_block = tk.StringVar(value=wfblocks.DEFAULT_BLOCKS[0].key)
 _workflow_editor = None
 _workflow_canvas = None
 _drag_block_index = None
 _drag_current_y = None
 
 _WORKFLOW_COLORS = {
+    "觸發": ("#ec4899", "#500724"),
+    "條件": ("#eab308", "#422006"),
     "農業": ("#22c55e", "#052e16"),
     "換裝+寵物": ("#38bdf8", "#082f49"),
     "清理": ("#f59e0b", "#451a03"),
@@ -1396,6 +1396,15 @@ def _workflow_actions():
         "switch_mosquito": lambda: _switch_pet_and_equip("mosquito", "工作流切蚊子", resume_farm=False, respect_pet_switch_cooldown=False),
         "sell_vinyl": lambda: example.sell_vinyl() if example is not None else log("工作流：example.py 未載入，無法賣唱片"),
         "pest_all": lambda: pest_run(),
+        "chat_pest_start": lambda context=None: threading.Thread(
+            target=chat_pest_run,
+            args=(int((context or {}).get("plot_num") or 0),),
+            daemon=True,
+        ).start() if (context or {}).get("plot_num") else log("工作流：chat_pest_start 缺少 plot_num context"),
+        "if_farm_on": lambda: farm_state == "on",
+        "if_chat_pest_enabled": lambda: _chat_pest_enabled,
+        "if_pest_idle": lambda: not _pest_busy,
+        "if_pet_not_mosquito": lambda: not pet_name_matches(get_current_pet(), "Mosquito"),
         "wait_1": lambda: time.sleep(1),
         "wait_5": lambda: time.sleep(5),
     }
@@ -1425,6 +1434,20 @@ def _workflow_run_selected():
     ).start()
 
 
+def _run_workflow_event(name: str, context: dict):
+    blocks = list(_workflows.get(name, []))
+    if not blocks:
+        log(f"工作流事件不存在：{name}，使用原始 ChatPest")
+        plot_num = context.get("plot_num")
+        if plot_num:
+            threading.Thread(target=chat_pest_run, args=(plot_num,), daemon=True).start()
+        return
+    threading.Thread(
+        target=lambda: wfblocks.run_workflow(name, blocks, _workflow_actions(), log, context=context),
+        daemon=True,
+    ).start()
+
+
 def _workflow_new():
     base = "自訂工作流"
     name = base
@@ -1441,7 +1464,14 @@ def _workflow_new():
 def _workflow_add_action(action: str):
     name = _selected_workflow.get().strip() or "自訂工作流"
     _workflows.setdefault(name, [])
-    _workflows[name].append({"action": action})
+    spec = wfblocks.find_spec(action)
+    if spec and spec.kind == "condition":
+        block = {"if": action, "then": []}
+    elif spec and spec.kind == "trigger":
+        block = {"trigger": action}
+    else:
+        block = {"action": action}
+    _workflows[name].append(block)
     _selected_workflow.set(name)
     _refresh_workflow_bar()
     log(f"工作流新增積木：{name} → {action}")
@@ -1510,7 +1540,7 @@ def _on_workflow_right_click(ev):
 
 
 def _draw_workflow_block(idx: int, block: dict, y: int, ghost: bool = False):
-    action = block.get("action", "")
+    action = wfblocks.block_key(block)
     spec = _block_spec(action)
     label = spec.label if spec else action
     cat = spec.category if spec else "?"
@@ -1522,7 +1552,9 @@ def _draw_workflow_block(idx: int, block: dict, y: int, ghost: bool = False):
     _workflow_canvas.create_rectangle(12, y, 438, y + 38, fill=bg, outline=outline, width=3 if ghost else 2)
     _workflow_canvas.create_oval(4, y + 10, 22, y + 28, fill=bg, outline=outline, width=2)
     _workflow_canvas.create_oval(428, y + 10, 446, y + 28, fill="#0f172a", outline=outline, width=2)
-    _workflow_canvas.create_text(30, y + 19, text=f"{idx + 1}. {cat}｜{label}", anchor="w", fill=fg, font=FL)
+    child_count = len(block.get("then", [])) if block.get("if") else 0
+    suffix = f"  then {child_count}" if child_count else ""
+    _workflow_canvas.create_text(30, y + 19, text=f"{idx + 1}. {cat}｜{label}{suffix}", anchor="w", fill=fg, font=FL)
 
 
 def _redraw_workflow_canvas():

@@ -1,22 +1,35 @@
 {
   "主工作流": [
     {
-      "action": "switch_dragon"
+      "if": "if_farm_on",
+      "then": [
+        {"action": "switch_dragon"},
+        {"action": "farm_entry_actions"},
+        {"action": "start_farm_keys"}
+      ]
     },
+    {"trigger": "trigger_pest_ready"},
     {
-      "action": "farm_entry_actions"
-    },
+      "if": "if_pet_not_mosquito",
+      "then": [
+        {"action": "stop_farm_keys"},
+        {"action": "switch_mosquito"},
+        {"action": "sell_vinyl"}
+      ]
+    }
+  ],
+  "Chat害蟲生成事件": [
+    {"trigger": "trigger_chat_pest"},
     {
-      "action": "start_farm_keys"
-    },
-    {
-      "action": "stop_farm_keys"
-    },
-    {
-      "action": "switch_mosquito"
-    },
-    {
-      "action": "sell_vinyl"
+      "if": "if_chat_pest_enabled",
+      "then": [
+        {
+          "if": "if_pest_idle",
+          "then": [
+            {"action": "chat_pest_start"}
+          ]
+        }
+      ]
     }
   ]
 }
