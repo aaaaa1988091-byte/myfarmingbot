@@ -1359,18 +1359,31 @@ _workflows = wfblocks.load_workflows()
 _workflow_names = list(_workflows.keys())
 _selected_workflow = tk.StringVar(value=_workflow_names[0] if _workflow_names else "農業啟動前置")
 _selected_block = tk.StringVar(value=wfblocks.DEFAULT_BLOCKS[0].key)
+_workflow_editor = None
+_workflow_canvas = None
+_drag_block_index = None
 
-for _child in workflow_frame.winfo_children():
-    _child.destroy()
-tk.Label(workflow_frame, text="🧩 工作流", bg=C["bg2"], fg=C["acc"], font=FL).grid(row=0, column=0, sticky="w")
-workflow_cb = ttk.Combobox(workflow_frame, width=14, state="readonly", textvariable=_selected_workflow, font=FM)
-workflow_cb.grid(row=0, column=1, padx=4, sticky="w")
-block_cb = ttk.Combobox(workflow_frame, width=18, state="readonly", textvariable=_selected_block, font=FM)
-block_cb.grid(row=0, column=2, padx=4, sticky="w")
-workflow_list = tk.Listbox(workflow_frame, height=4, bg=C["bg"], fg=C["fg"], font=FM,
-                           selectbackground=C["bg3"], relief="flat", exportselection=False)
-workflow_list.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(4, 0))
-workflow_frame.grid_columnconfigure(4, weight=1)
+_WORKFLOW_COLORS = {
+    "農業": ("#39d353", "#06220c"),
+    "換裝+寵物": ("#c8ff00", "#1a2e1a"),
+    "清理": ("#ffe53b", "#332700"),
+    "除蟲": ("#ff8c42", "#2b1200"),
+    "時間": ("#8e44ad", "#f4e6ff"),
+}
+
+
+def _block_spec(action: str):
+    for spec in wfblocks.DEFAULT_BLOCKS:
+        if spec.key == action:
+            return spec
+    return None
+
+
+def _block_colors(action: str):
+    spec = _block_spec(action)
+    if spec:
+        return _WORKFLOW_COLORS.get(spec.category, (C["bg3"], C["fg"]))
+    return C["bg3"], C["fg"]
 
 
 def _workflow_actions():
@@ -1387,52 +1400,14 @@ def _workflow_actions():
     }
 
 
-def _refresh_workflow_ui(*_):
+def _refresh_workflow_bar(*_):
     workflow_cb["values"] = list(_workflows.keys())
-    block_cb["values"] = [spec.key for spec in wfblocks.DEFAULT_BLOCKS]
     name = _selected_workflow.get()
     if name not in _workflows and _workflows:
-        name = next(iter(_workflows))
-        _selected_workflow.set(name)
-    workflow_list.delete(0, "end")
-    for idx, block in enumerate(_workflows.get(name, []), 1):
-        workflow_list.insert("end", f"{idx}. {wfblocks.block_label(block.get('action', ''))}")
-
-
-def _workflow_add_block():
-    name = _selected_workflow.get().strip() or "自訂工作流"
-    _workflows.setdefault(name, [])
-    _workflows[name].append({"action": _selected_block.get()})
-    _selected_workflow.set(name)
-    _refresh_workflow_ui()
-    log(f"工作流新增積木：{name} → {_selected_block.get()}")
-
-
-def _workflow_remove_block():
-    name = _selected_workflow.get()
-    sel = workflow_list.curselection()
-    if not sel:
-        return
-    idx = sel[0]
-    blocks = _workflows.get(name, [])
-    if 0 <= idx < len(blocks):
-        removed = blocks.pop(idx)
-        log(f"工作流移除積木：{name} → {removed.get('action')}")
-    _refresh_workflow_ui()
-
-
-def _workflow_move(delta: int):
-    name = _selected_workflow.get()
-    sel = workflow_list.curselection()
-    if not sel:
-        return
-    idx = sel[0]
-    blocks = _workflows.get(name, [])
-    new_idx = idx + delta
-    if 0 <= idx < len(blocks) and 0 <= new_idx < len(blocks):
-        blocks[idx], blocks[new_idx] = blocks[new_idx], blocks[idx]
-        _refresh_workflow_ui()
-        workflow_list.selection_set(new_idx)
+        _selected_workflow.set(next(iter(_workflows)))
+    count = len(_workflows.get(_selected_workflow.get(), []))
+    workflow_count_var.set(f"{count} blocks")
+    _redraw_workflow_canvas()
 
 
 def _workflow_save():
@@ -1458,19 +1433,139 @@ def _workflow_new():
         name = f"{base}{n}"
     _workflows[name] = []
     _selected_workflow.set(name)
-    _refresh_workflow_ui()
+    _refresh_workflow_bar()
     log(f"工作流新增：{name}")
 
 
-workflow_cb.bind("<<ComboboxSelected>>", _refresh_workflow_ui)
-rnd_btn(workflow_frame, "+", _workflow_add_block, C["bg3"], C["acc"], width=2, height=1).grid(row=0, column=3, padx=2)
-rnd_btn(workflow_frame, "New", _workflow_new, C["bg3"], C["dim"], width=4, height=1).grid(row=0, column=4, padx=2, sticky="w")
-rnd_btn(workflow_frame, "↑", lambda: _workflow_move(-1), C["bg3"], C["acc"], width=2, height=1).grid(row=2, column=0, pady=3, sticky="w")
-rnd_btn(workflow_frame, "↓", lambda: _workflow_move(1), C["bg3"], C["acc"], width=2, height=1).grid(row=2, column=0, padx=(34, 0), pady=3, sticky="w")
-rnd_btn(workflow_frame, "Del", _workflow_remove_block, C["bg3"], C["red"], width=4, height=1).grid(row=2, column=1, pady=3, sticky="w")
-rnd_btn(workflow_frame, "Save", _workflow_save, C["bg3"], C["yel"], width=5, height=1).grid(row=2, column=2, pady=3, sticky="w")
-rnd_btn(workflow_frame, "Run", _workflow_run_selected, C["grn"], "#1a2e1a", width=5, height=1).grid(row=2, column=3, pady=3, sticky="w")
-_refresh_workflow_ui()
+def _workflow_add_action(action: str):
+    name = _selected_workflow.get().strip() or "自訂工作流"
+    _workflows.setdefault(name, [])
+    _workflows[name].append({"action": action})
+    _selected_workflow.set(name)
+    _refresh_workflow_bar()
+    log(f"工作流新增積木：{name} → {action}")
+
+
+def _workflow_delete_index(idx: int):
+    name = _selected_workflow.get()
+    blocks = _workflows.get(name, [])
+    if 0 <= idx < len(blocks):
+        removed = blocks.pop(idx)
+        log(f"工作流移除積木：{name} → {removed.get('action')}")
+    _refresh_workflow_bar()
+
+
+def _workflow_move_index(idx: int, new_idx: int):
+    name = _selected_workflow.get()
+    blocks = _workflows.get(name, [])
+    if 0 <= idx < len(blocks) and 0 <= new_idx < len(blocks) and idx != new_idx:
+        block = blocks.pop(idx)
+        blocks.insert(new_idx, block)
+        log(f"工作流拖曳排序：{name} #{idx + 1} → #{new_idx + 1}")
+    _refresh_workflow_bar()
+
+
+def _workflow_canvas_index(y: int) -> int:
+    return max(0, min(len(_workflows.get(_selected_workflow.get(), [])) - 1, int((y - 16) // 46)))
+
+
+def _on_workflow_press(ev):
+    global _drag_block_index
+    blocks = _workflows.get(_selected_workflow.get(), [])
+    if not blocks:
+        _drag_block_index = None
+        return
+    _drag_block_index = _workflow_canvas_index(ev.y)
+
+
+def _on_workflow_release(ev):
+    global _drag_block_index
+    if _drag_block_index is None:
+        return
+    _workflow_move_index(_drag_block_index, _workflow_canvas_index(ev.y))
+    _drag_block_index = None
+
+
+def _on_workflow_right_click(ev):
+    blocks = _workflows.get(_selected_workflow.get(), [])
+    if blocks:
+        _workflow_delete_index(_workflow_canvas_index(ev.y))
+
+
+def _redraw_workflow_canvas():
+    if _workflow_canvas is None:
+        return
+    _workflow_canvas.delete("all")
+    blocks = _workflows.get(_selected_workflow.get(), [])
+    if not blocks:
+        _workflow_canvas.create_text(18, 24, text="從左側 Palette 點擊積木加入工作流", anchor="w", fill=C["dim"], font=FM)
+        return
+    for idx, block in enumerate(blocks):
+        action = block.get("action", "")
+        spec = _block_spec(action)
+        label = spec.label if spec else action
+        cat = spec.category if spec else "?"
+        bg, fg = _block_colors(action)
+        y = 16 + idx * 46
+        _workflow_canvas.create_rectangle(12, y, 430, y + 34, fill=bg, outline=C["acc"], width=2)
+        _workflow_canvas.create_oval(4, y + 8, 20, y + 24, fill=bg, outline=C["acc"], width=2)
+        _workflow_canvas.create_oval(422, y + 8, 438, y + 24, fill=C["bg2"], outline=C["acc"], width=2)
+        _workflow_canvas.create_text(28, y + 17, text=f"{idx + 1}. {cat}｜{label}", anchor="w", fill=fg, font=FL)
+    _workflow_canvas.configure(scrollregion=(0, 0, 460, max(230, 24 + len(blocks) * 46)))
+
+
+def _open_workflow_editor():
+    global _workflow_editor, _workflow_canvas
+    if _workflow_editor and _workflow_editor.winfo_exists():
+        _workflow_editor.lift()
+        return
+    _workflow_editor = tk.Toplevel(tk_root)
+    _workflow_editor.title("🧩 Workflow Blocks")
+    _workflow_editor.geometry("760x420")
+    _workflow_editor.configure(bg=C["bg"])
+    _workflow_editor.attributes("-topmost", True)
+
+    left = tk.Frame(_workflow_editor, bg=C["bg2"], padx=8, pady=8)
+    left.pack(side="left", fill="y")
+    tk.Label(left, text="Palette\n點擊加入", bg=C["bg2"], fg=C["acc"], font=FL, justify="left").pack(anchor="w", pady=(0, 6))
+    for spec in wfblocks.DEFAULT_BLOCKS:
+        bg, fg = _block_colors(spec.key)
+        btn = tk.Button(left, text=f"{spec.category}\n{spec.label}", command=lambda a=spec.key: _workflow_add_action(a),
+                        bg=bg, fg=fg, activebackground=C["acc"], activeforeground="#1a2e1a",
+                        relief="flat", width=18, height=2, font=FM, cursor="hand2")
+        btn.pack(fill="x", pady=2)
+
+    right = tk.Frame(_workflow_editor, bg=C["bg"], padx=8, pady=8)
+    right.pack(side="left", fill="both", expand=True)
+    tk.Label(right, text="拖曳右側積木即可排序；右鍵刪除", bg=C["bg"], fg=C["fg"], font=FL).pack(anchor="w")
+    _workflow_canvas = tk.Canvas(right, bg="#102010", highlightthickness=2, highlightbackground=C["acc"])
+    _workflow_canvas.pack(fill="both", expand=True, pady=6)
+    _workflow_canvas.bind("<ButtonPress-1>", _on_workflow_press)
+    _workflow_canvas.bind("<ButtonRelease-1>", _on_workflow_release)
+    _workflow_canvas.bind("<Button-3>", _on_workflow_right_click)
+
+    bottom = tk.Frame(right, bg=C["bg"])
+    bottom.pack(fill="x")
+    tk.Button(bottom, text="New", command=_workflow_new, bg=C["bg3"], fg=C["fg"], relief="flat", font=FB).pack(side="left", padx=2)
+    tk.Button(bottom, text="Save", command=_workflow_save, bg=C["yel"], fg="#332700", relief="flat", font=FB).pack(side="left", padx=2)
+    tk.Button(bottom, text="Run", command=_workflow_run_selected, bg=C["grn"], fg="#06220c", relief="flat", font=FB).pack(side="left", padx=2)
+    _redraw_workflow_canvas()
+
+
+# 主視窗只保留不擠版的精簡工作流列；真正可視化拖曳在 Editor 視窗。
+for _child in workflow_frame.winfo_children():
+    _child.destroy()
+workflow_frame.configure(bg=C["bg2"])
+tk.Label(workflow_frame, text="🧩 工作流", bg=C["bg2"], fg=C["acc"], font=FL).pack(side="left", padx=(0, 6))
+workflow_cb = ttk.Combobox(workflow_frame, width=16, state="readonly", textvariable=_selected_workflow, font=FM)
+workflow_cb.pack(side="left", padx=2)
+workflow_count_var = tk.StringVar(value="0 blocks")
+tk.Label(workflow_frame, textvariable=workflow_count_var, bg=C["bg2"], fg=C["fg"], font=FM).pack(side="left", padx=6)
+rnd_btn(workflow_frame, "Editor", _open_workflow_editor, C["bg3"], C["acc"], width=7, height=1).pack(side="left", padx=2)
+rnd_btn(workflow_frame, "Run", _workflow_run_selected, C["grn"], "#1a2e1a", width=5, height=1).pack(side="left", padx=2)
+rnd_btn(workflow_frame, "Save", _workflow_save, C["yel"], "#332700", width=5, height=1).pack(side="left", padx=2)
+workflow_cb.bind("<<ComboboxSelected>>", _refresh_workflow_bar)
+_refresh_workflow_bar()
 
 
 def initial_pest_scan_once():
