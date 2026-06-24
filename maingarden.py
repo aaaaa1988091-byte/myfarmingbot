@@ -19,6 +19,7 @@ import asyncio
 
 # ── 載入函式庫 ──────────────────────────────────
 import garden2 as g2
+import workflow_blocks as wfblocks
 try:
     import example
 except Exception as e:
@@ -1346,6 +1347,126 @@ def toggle_chat_pest():
 
 chat_btn = rnd_btn(cf, "🐛 OFF", toggle_chat_pest, C["bg3"], C["dim"], width=5, height=2)
 chat_btn.pack(side="left", padx=(4, 0))
+
+# ────────────────────────────────────────────────
+#  Scratch-like 工作流積木 UI
+# ────────────────────────────────────────────────
+_workflows = wfblocks.load_workflows()
+_workflow_names = list(_workflows.keys())
+_selected_workflow = tk.StringVar(value=_workflow_names[0] if _workflow_names else "農業啟動前置")
+_selected_block = tk.StringVar(value=wfblocks.DEFAULT_BLOCKS[0].key)
+
+workflow_frame = tk.Frame(tk_root, bg=C["bg2"], pady=5, padx=8)
+workflow_frame.pack(fill="x", padx=8, pady=(0, 4))
+tk.Label(workflow_frame, text="🧩 工作流", bg=C["bg2"], fg=C["acc"], font=FL).grid(row=0, column=0, sticky="w")
+workflow_cb = ttk.Combobox(workflow_frame, width=14, state="readonly", textvariable=_selected_workflow, font=FM)
+workflow_cb.grid(row=0, column=1, padx=4, sticky="w")
+block_cb = ttk.Combobox(workflow_frame, width=18, state="readonly", textvariable=_selected_block, font=FM)
+block_cb.grid(row=0, column=2, padx=4, sticky="w")
+workflow_list = tk.Listbox(workflow_frame, height=4, bg=C["bg"], fg=C["fg"], font=FM,
+                           selectbackground=C["bg3"], relief="flat", exportselection=False)
+workflow_list.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(4, 0))
+workflow_frame.grid_columnconfigure(4, weight=1)
+
+
+def _workflow_actions():
+    return {
+        "stop_farm_keys": lambda: stop_farm_keys(),
+        "start_farm_keys": lambda: start_farm_keys(),
+        "farm_entry_actions": lambda: perform_farm_entry_actions(),
+        "switch_dragon": lambda: _switch_pet_and_equip("dragon", "工作流切玫瑰龍", resume_farm=False, respect_pet_switch_cooldown=False),
+        "switch_mosquito": lambda: _switch_pet_and_equip("mosquito", "工作流切蚊子", resume_farm=False, respect_pet_switch_cooldown=False),
+        "sell_vinyl": lambda: example.sell_vinyl() if example is not None else log("工作流：example.py 未載入，無法賣唱片"),
+        "pest_all": lambda: pest_run(),
+        "wait_1": lambda: time.sleep(1),
+        "wait_5": lambda: time.sleep(5),
+    }
+
+
+def _refresh_workflow_ui(*_):
+    workflow_cb["values"] = list(_workflows.keys())
+    block_cb["values"] = [spec.key for spec in wfblocks.DEFAULT_BLOCKS]
+    name = _selected_workflow.get()
+    if name not in _workflows and _workflows:
+        name = next(iter(_workflows))
+        _selected_workflow.set(name)
+    workflow_list.delete(0, "end")
+    for idx, block in enumerate(_workflows.get(name, []), 1):
+        workflow_list.insert("end", f"{idx}. {wfblocks.block_label(block.get('action', ''))}")
+
+
+def _workflow_add_block():
+    name = _selected_workflow.get().strip() or "自訂工作流"
+    _workflows.setdefault(name, [])
+    _workflows[name].append({"action": _selected_block.get()})
+    _selected_workflow.set(name)
+    _refresh_workflow_ui()
+    log(f"工作流新增積木：{name} → {_selected_block.get()}")
+
+
+def _workflow_remove_block():
+    name = _selected_workflow.get()
+    sel = workflow_list.curselection()
+    if not sel:
+        return
+    idx = sel[0]
+    blocks = _workflows.get(name, [])
+    if 0 <= idx < len(blocks):
+        removed = blocks.pop(idx)
+        log(f"工作流移除積木：{name} → {removed.get('action')}")
+    _refresh_workflow_ui()
+
+
+def _workflow_move(delta: int):
+    name = _selected_workflow.get()
+    sel = workflow_list.curselection()
+    if not sel:
+        return
+    idx = sel[0]
+    blocks = _workflows.get(name, [])
+    new_idx = idx + delta
+    if 0 <= idx < len(blocks) and 0 <= new_idx < len(blocks):
+        blocks[idx], blocks[new_idx] = blocks[new_idx], blocks[idx]
+        _refresh_workflow_ui()
+        workflow_list.selection_set(new_idx)
+
+
+def _workflow_save():
+    wfblocks.save_workflows(_workflows)
+    log(f"工作流已儲存：{wfblocks.WORKFLOW_FILE}")
+
+
+def _workflow_run_selected():
+    name = _selected_workflow.get()
+    blocks = list(_workflows.get(name, []))
+    threading.Thread(
+        target=lambda: wfblocks.run_workflow(name, blocks, _workflow_actions(), log),
+        daemon=True,
+    ).start()
+
+
+def _workflow_new():
+    base = "自訂工作流"
+    name = base
+    n = 1
+    while name in _workflows:
+        n += 1
+        name = f"{base}{n}"
+    _workflows[name] = []
+    _selected_workflow.set(name)
+    _refresh_workflow_ui()
+    log(f"工作流新增：{name}")
+
+
+workflow_cb.bind("<<ComboboxSelected>>", _refresh_workflow_ui)
+rnd_btn(workflow_frame, "+", _workflow_add_block, C["bg3"], C["acc"], width=2, height=1).grid(row=0, column=3, padx=2)
+rnd_btn(workflow_frame, "New", _workflow_new, C["bg3"], C["dim"], width=4, height=1).grid(row=0, column=4, padx=2, sticky="w")
+rnd_btn(workflow_frame, "↑", lambda: _workflow_move(-1), C["bg3"], C["acc"], width=2, height=1).grid(row=2, column=0, pady=3, sticky="w")
+rnd_btn(workflow_frame, "↓", lambda: _workflow_move(1), C["bg3"], C["acc"], width=2, height=1).grid(row=2, column=0, padx=(34, 0), pady=3, sticky="w")
+rnd_btn(workflow_frame, "Del", _workflow_remove_block, C["bg3"], C["red"], width=4, height=1).grid(row=2, column=1, pady=3, sticky="w")
+rnd_btn(workflow_frame, "Save", _workflow_save, C["bg3"], C["yel"], width=5, height=1).grid(row=2, column=2, pady=3, sticky="w")
+rnd_btn(workflow_frame, "Run", _workflow_run_selected, C["grn"], "#1a2e1a", width=5, height=1).grid(row=2, column=3, pady=3, sticky="w")
+_refresh_workflow_ui()
 
 
 def initial_pest_scan_once():
